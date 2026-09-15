@@ -77,9 +77,12 @@ function Set-CmoAccountDepleted {
     param([string]$Email, [switch]$Off)
     if (-not $Email) { throw 'email required' }
     $p = Get-CmoAccountPrefs
-    $val = ''
-    if (-not $Off) { $val = (Get-CmoTodayKey) }
-    $p.depleted | Add-Member -NotePropertyName $Email -NotePropertyValue $val -Force
+    if ($Off) {
+        # clear = drop the entry entirely (an empty string would be dead weight)
+        try { $p.depleted.PSObject.Properties.Remove($Email) } catch { }
+    } else {
+        $p.depleted | Add-Member -NotePropertyName $Email -NotePropertyValue (Get-CmoTodayKey) -Force
+    }
     Save-CmoAccountPrefs -Prefs $p | Out-Null
 }
 function Get-CmoDailyResetSpan {

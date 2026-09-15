@@ -264,7 +264,11 @@ function Show-CmoAddAccount {
     $win.ShowDialog() | Out-Null
 }
 
-function Show-CmoBudgetEditor([object]$Row) {
+function Show-CmoBudgetEditor([string]$Email) {
+    # re-read the row from disk so the dialog never depends on the caller's scope
+    $Row = @(Get-CmoAccountSummary -Accounts (Get-CmoAccounts) |
+        Where-Object { ([string]$_.Email).ToLowerInvariant() -eq ([string]$Email).ToLowerInvariant() })[0]
+    if (-not $Row) { return }
     $tb = New-Object System.Windows.Controls.TextBox -Property @{ Width = 70; FontSize = 12; Text = [string][int]$Row.BudgetMin }
     $win = New-Object System.Windows.Window -Property @{
         Title = 'Daily free budget'; SizeToContent = 'WidthAndHeight'; Owner = $w
@@ -273,9 +277,10 @@ function Show-CmoBudgetEditor([object]$Row) {
     [void]$p.Children.Add((New-Text ('Minutes of free usage per day for ' + $Row.Email) 12 $dim))
     $tb.Margin = '0,6,0,10'
     [void]$p.Children.Add($tb)
-    [void]$p.Children.Add((New-TinyButton 'Save' {
-                try { Set-CmoAccountBudgetMin -Email $Row.Email -Minutes ([int]$tb.Text) | Out-Null } catch { }
-                $win.Close(); Render-Accounts } $green))
+    $saveEmail = [string]$Row.Email
+    [void]$p.Children.Add((New-TinyButton 'Save' `
+                ({ try { Set-CmoAccountBudgetMin -Email $saveEmail -Minutes ([int]$tb.Text) | Out-Null } catch { }
+                    $win.Close(); Render-Accounts }).GetNewClosure() $green))
     $win.Content = $p
     $tb.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Return') { $win.Close(); Render-Accounts } })
     $win.Add_ContentRendered({ $tb.Focus() | Out-Null; $tb.SelectAll() })
@@ -316,15 +321,23 @@ function New-AccountRow([object]$r) {
     [void]$g.Children.Add($usage)
     [System.Windows.Controls.Grid]::SetColumn($usage, 3)
     $cell = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; HorizontalAlignment = 'Right'; VerticalAlignment = 'Center' }
-    $email = $r.Email
-    [void]$cell.Children.Add((New-TinyButton ('budget ' + [int]$r.BudgetMin + 'm') { Show-CmoBudgetEditor $r } $teal))
+    $email = [string]$r.Email
+    $bBudget = New-TinyButton ('budget ' + [int]$r.BudgetMin + 'm') ({ Show-CmoBudgetEditor -Email $email }).GetNewClosure() $teal
+    $bBudget.ToolTip = ('daily free budget for ' + $email)
+    [void]$cell.Children.Add($bBudget)
     if ($r.DepletedToday) {
-        [void]$cell.Children.Add((New-TinyButton 'clear used-up' { Set-CmoAccountDepleted -Email $email -Off; Render-Accounts } $amber))
+        $bClear = New-TinyButton 'clear used-up' ({ Set-CmoAccountDepleted -Email $email -Off; Render-Accounts }).GetNewClosure() $amber
+        $bClear.ToolTip = ('clear the used-up mark for ' + $email)
+        [void]$cell.Children.Add($bClear)
     } else {
-        [void]$cell.Children.Add((New-TinyButton 'mark used up' { Set-CmoAccountDepleted -Email $email; Render-Accounts } $dim))
+        $bMark = New-TinyButton 'mark used up' ({ Set-CmoAccountDepleted -Email $email; Render-Accounts }).GetNewClosure() $dim
+        $bMark.ToolTip = ('mark ' + $email + ' as used up for today')
+        [void]$cell.Children.Add($bMark)
     }
     if ($r.Sources -contains 'added') {
-        [void]$cell.Children.Add((New-TinyButton 'remove' { Remove-CmoExtraAccount -Email $email | Out-Null; Render-Accounts } $red))
+        $bRemove = New-TinyButton 'remove' ({ Remove-CmoExtraAccount -Email $email | Out-Null; Render-Accounts }).GetNewClosure() $red
+        $bRemove.ToolTip = ('stop tracking ' + $email)
+        [void]$cell.Children.Add($bRemove)
     }
     [void]$g.Children.Add($cell)
     [System.Windows.Controls.Grid]::SetColumn($cell, 4)
@@ -347,6 +360,14 @@ function Save-CmoPreferredIds {
     Set-CmoUserPreferred -PreferredFreeModels @($Ids) -MaxFreeModels $MaxFree | Out-Null
     $script:routing = Get-CmoRoutingConfig
     Render-Ladder
+}
+
+function Reset-CmoPreferred {
+    # drop the user override file -> back to the bundled defaults
+    Remove-Item -LiteralPath (Get-CmoUserPreferredPath) -ErrorAction SilentlyContinue
+    $script:routing = Get-CmoRoutingConfig
+    Render-Ladder
+    Render-Accounts
 }
 
 function Move-CmoPreferredId([string]$Id, [int]$Delta) {
@@ -389,13 +410,11 @@ function Render-Ladder {
         $col = $dim
         if ($n -eq $maxFree) { $col = $teal }
         $nn = $n
-        [void]$ladderCard.Actions.Children.Add((New-TinyButton ([string]$n) {
-                    Save-CmoPreferredIds -Ids (Get-CmoPreferredIds) -MaxFree $nn } $col))
+        [void]$ladderCard.Actions.Children.Add((New-TinyButton ([string]$n) `
+                    ({ Save-CmoPreferredIds -Ids (Get-CmoPreferredIds) -MaxFree $nn }).GetNewClosure() $col))
     }
-    [void]$ladderCard.Actions.Children.Add((New-TinyButton 'reset defaults' {
-                Remove-Item -LiteralPath (Get-CmoUserPreferredPath) -ErrorAction SilentlyContinue
-                $script:routing = Get-CmoRoutingConfig
-                Render-Ladder } $amber))
+    [void]$ladderCard.Actions.Children.Add((New-TinyButton 'reset defaults' `
+                ({ Reset-CmoPreferred }).GetNewClosure() $amber))
 
     $eff = Get-CmoEffectiveStrategy -Routing $script:routing -Mode 'act'
     $steps = @($eff.Steps)
@@ -428,14 +447,14 @@ function Render-Ladder {
         $acts = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; HorizontalAlignment = 'Right'; VerticalAlignment = 'Center' }
         $mv = [string]$s.model
         if ($isPinned) {
-            [void]$acts.Children.Add((New-TinyButton ([char]0x25B2) { Move-CmoPreferredId $mv -1 } $teal))
-            [void]$acts.Children.Add((New-TinyButton ([char]0x25BC) { Move-CmoPreferredId $mv 1 } $teal))
-            [void]$acts.Children.Add((New-TinyButton ([char]0x2715) { Remove-CmoPreferredId $mv } $red))
+            [void]$acts.Children.Add((New-TinyButton ([char]0x25B2) ({ Move-CmoPreferredId $mv -1 }).GetNewClosure() $teal))
+            [void]$acts.Children.Add((New-TinyButton ([char]0x25BC) ({ Move-CmoPreferredId $mv 1 }).GetNewClosure() $teal))
+            [void]$acts.Children.Add((New-TinyButton ([char]0x2715) ({ Remove-CmoPreferredId $mv }).GetNewClosure() $red))
         } else {
-            [void]$acts.Children.Add((New-TinyButton '+ pin' { Add-CmoPreferredId $mv } $green))
+            [void]$acts.Children.Add((New-TinyButton '+ pin' ({ Add-CmoPreferredId $mv }).GetNewClosure() $green))
         }
         $rn = $rank
-        [void]$acts.Children.Add((New-TinyButton ('Use #' + $rn) { Start-CmoApply -Rank $rn } $teal))
+        [void]$acts.Children.Add((New-TinyButton ('Use #' + $rn) ({ Start-CmoApply -Rank $rn }).GetNewClosure() $teal))
         [void]$g.Children.Add($acts)
         [System.Windows.Controls.Grid]::SetColumn($acts, 2)
         $row.Child = $g
@@ -451,8 +470,8 @@ function Render-Ladder {
         foreach ($c in $candidates) { [void]$cb.Items.Add($c) }
         $cb.SelectedIndex = 0
         [void]$addRow.Children.Add($cb)
-        [void]$addRow.Children.Add((New-TinyButton '+ add to top' {
-                    if ($cb.SelectedItem) { Add-CmoPreferredId ([string]$cb.SelectedItem) } } $green))
+        [void]$addRow.Children.Add((New-TinyButton '+ add to top' `
+                    ({ if ($cb.SelectedItem) { Add-CmoPreferredId ([string]$cb.SelectedItem) } }).GetNewClosure() $green))
         [void]$ladderCard.Body.Children.Add($addRow)
     } elseif ($pinned.Count -eq 0) {
         [void]$ladderCard.Body.Children.Add((New-Text 'no free models resolved yet - press Refresh to fetch the live list' 11 $amber))
