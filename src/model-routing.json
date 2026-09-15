@@ -1,0 +1,56 @@
+{
+  "version": 3,
+  "strategy": "free-first",
+  "freeSelection": {
+    "maxFreeModels": 2,
+    "preferredFreeModels": [
+      "z-ai/glm-5.3-flash",
+      "cline-free/deepseek-v4.1-flash",
+      "deepseek/deepseek-v4-flash"
+    ],
+    "fillFromDynamic": true,
+    "subscriptionSteps": [
+      { "provider": "cline-pass", "model": "cline-pass/glm-5.3-flash", "thinking": "off" },
+      { "provider": "cline-pass", "model": "cline-pass/deepseek-v4-flash", "thinking": "off" }
+    ]
+  },
+  "dynamic": {
+    "enabled": true,
+    "endpoint": "https://api.cline.bot/api/v1/ai/cline/recommended-models",
+    "timeoutSeconds": 10,
+    "ttlHours": 6,
+    "fallbackFreeModels": [
+      "kwaipilot/kat-coder-pro",
+      "arcee-ai/trinity-large-preview:free"
+    ]
+  },
+  "strategies": {
+    "free-first": {
+      "description": "Static fallback ladder used only when the dynamic free list cannot be resolved at all.",
+      "plan": [
+        { "provider": "cline", "model": "z-ai/glm-5.3-flash", "thinking": "high" },
+        { "provider": "cline", "model": "cline-free/deepseek-v4.1-flash", "thinking": "off" },
+        { "provider": "cline-pass", "model": "cline-pass/glm-5.3-flash", "thinking": "off" },
+        { "provider": "cline-pass", "model": "cline-pass/deepseek-v4-flash", "thinking": "off" }
+      ],
+      "act": [
+        { "provider": "cline", "model": "z-ai/glm-5.3-flash", "thinking": "high" },
+        { "provider": "cline", "model": "cline-free/deepseek-v4.1-flash", "thinking": "off" },
+        { "provider": "cline-pass", "model": "cline-pass/glm-5.3-flash", "thinking": "off" },
+        { "provider": "cline-pass", "model": "cline-pass/deepseek-v4-flash", "thinking": "off" }
+      ]
+    }
+  },
+  "tierRules": {
+    "freePrefixes": ["cline-free/"],
+    "freeSuffixes": [":free"],
+    "freeModels": [
+      "z-ai/glm-5.3-flash",
+      "cline-free/deepseek-v4.1-flash",
+      "deepseek/deepseek-v4-flash",
+      "kwaipilot/kat-coder-pro",
+      "arcee-ai/trinity-large-preview:free"
+    ],
+    "subscriptionPrefixes": ["cline-pass/"]
+  }
+}
