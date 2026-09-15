@@ -44,7 +44,8 @@ function Invoke-CmoToast {
 
 $state = @{ LastCheck = (Get-Date).ToString('o'); LastStatus = 'init'
             LastToastPaid = $null; LastToastAuth = $null
-            TierMinutes = @{ free = 0.0; subscription = 0.0; paid = 0.0 }; TierDate = (Get-Date -Format 'yyyy-MM-dd') }
+            TierMinutes = @{ free = 0.0; subscription = 0.0; paid = 0.0 }; TierDate = (Get-Date -Format 'yyyy-MM-dd')
+            AccountMinutes = @{} }
 if (Test-Path -LiteralPath $gState) {
     try {
         $s = Get-Content -LiteralPath $gState -Raw | ConvertFrom-Json
@@ -52,6 +53,7 @@ if (Test-Path -LiteralPath $gState) {
         $state.LastToastPaid = $s.LastToastPaid; $state.LastToastAuth = $s.LastToastAuth
         $state.TierDate = $s.TierDate
         foreach ($k in 'free','subscription','paid') { $state.TierMinutes[$k] = [double]$s.TierMinutes.$k }
+        if ($s.AccountMinutes) { foreach ($k in @($s.AccountMinutes.PSObject.Properties.Name)) { $state.AccountMinutes[$k] = [double]$s.AccountMinutes.$k } }
     } catch { }
 }
 function Save-State([string]$status) {
@@ -59,7 +61,7 @@ function Save-State([string]$status) {
     $state.LastCheck = (Get-Date).ToString('o')
     @{ LastCheck = $state.LastCheck; LastStatus = $status
        LastToastPaid = $state.LastToastPaid; LastToastAuth = $state.LastToastAuth
-       TierMinutes = $state.TierMinutes; TierDate = $state.TierDate } |
+       TierMinutes = $state.TierMinutes; TierDate = $state.TierDate; AccountMinutes = $state.AccountMinutes } |
         ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $gState -Force
 }
 
@@ -82,7 +84,20 @@ if ($elapsedMin -gt 0 -and $elapsedMin -lt 30) {
         default    { $null }
     }
     if ($lastTier) { $state.TierMinutes[$lastTier] = [math]::Round($state.TierMinutes[$lastTier] + $elapsedMin, 1) }
+    # per-login usage: attribute elapsed minutes to the live login's email so the
+    # dashboard can show which account did the work today (observed, not quota).
+    try {
+        $liveKey = $null
+        $ap = $snap.Act.Provider
+        $hit = @($snap.Accounts | Where-Object { $_.Provider -eq $ap -and $_.Email })
+        if ($hit.Count -gt 0) { $liveKey = $hit[0].Email }
+        if ($liveKey) {
+            if (-not $state.AccountMinutes.ContainsKey($liveKey)) { $state.AccountMinutes[$liveKey] = 0.0 }
+            $state.AccountMinutes[$liveKey] = [math]::Round($state.AccountMinutes[$liveKey] + $elapsedMin, 1)
+        }
+    } catch { }
 }
+if ($state.TierDate -ne $today) { $state.AccountMinutes = @{} }
 
 # ---- evaluate ----
 $act = $snap.Act

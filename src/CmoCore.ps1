@@ -7,6 +7,9 @@ function Get-CmoDataDir {
     return Join-Path $env:USERPROFILE '.cline\data'
 }
 
+# account quota view (per-account daily budget, 'used up today' marker, health)
+. (Join-Path $PSScriptRoot 'CmoAccounts.ps1')
+
 function Get-CmoRoutingConfig {
     param([string]$ConfigPath)
     if (-not $ConfigPath) { $ConfigPath = Join-Path $PSScriptRoot 'model-routing.json' }
@@ -172,14 +175,62 @@ function Get-CmoAccounts {
             SignedIn  = $true
         }
     }
+    # quota status per account row: LIVE = driving Act right now,
+    # TRACKED = rotation member (not the live login), OFF = unsigned provider
+    try {
+        $st = Get-CmoActiveState
+        $liveE = $null; $liveM = $null
+        if ($st) {
+            $ap = $st.ActProvider
+            $cand = @($out | Where-Object { $_.Provider -eq $ap -and $_.Email })
+            if ($cand.Count -gt 0) { $liveE = $cand[0].Email }
+            $liveM = $st.ActModel
+        }
+        $min = Get-CmoAccountMinutes
+        foreach ($a in $out) {
+            # per-row guard: one bad row must never rob the other rows of status.
+            try {
+                $q = 'OFF'
+                if ($a.SignedIn) { $q = 'TRACKED' }
+                if ($liveE -and $a.Email -and $a.Email -eq $liveE) { $q = 'LIVE' }
+                # indexing the minutes map with a null/empty key throws a
+                # RuntimeException - unsigned providers (no email) have none.
+                $used = 0
+                if ($a.Email) {
+                    $u = $min[$a.Email]
+                    if ($null -eq $u) { $u = $min[($a.Email + '|' + [string]$liveM)] }
+                    if ($null -ne $u) { $used = [double]$u }
+                }
+                $h = Get-CmoAccountHealth -Email $a.Email -UsedMin $used -SignedIn ([bool]$a.SignedIn)
+                $a | Add-Member -NotePropertyName Quota -NotePropertyValue $q -Force
+                $a | Add-Member -NotePropertyName UsedMin -NotePropertyValue ([double]$used) -Force
+                $a | Add-Member -NotePropertyName Health -NotePropertyValue $h.State -Force
+                $a | Add-Member -NotePropertyName HealthLabel -NotePropertyValue $h.Label -Force
+                $a | Add-Member -NotePropertyName BudgetMin -NotePropertyValue $h.Budget -Force
+                $a | Add-Member -NotePropertyName Percent -NotePropertyValue $h.Percent -Force
+                $a | Add-Member -NotePropertyName DepletedToday -NotePropertyValue $h.Depleted -Force
+            } catch { }
+        }
+    } catch { }
     # stable order: cline, cline-pass, then everything else alphabetically
     $order = @{ 'cline' = 0; 'cline-pass' = 1 }
     return @($out | Sort-Object { if ($order.ContainsKey($_.Provider)) { $order[$_.Provider] } else { 9 } }, Provider)
 }
 
+function Get-CmoAccountMinutes {
+    # per-login today's usage minutes, tracked by the guardian (keyed by email).
+    # This is observed usage, NOT a quota API (Cline exposes no quota endpoint).
+    $fp = Join-Path $env:LOCALAPPDATA 'ClineModelOptimizer\guardian-state.json'
+    if (-not (Test-Path -LiteralPath $fp)) { return @{} }
+    try {
+        $s = Get-Content -LiteralPath $fp -Raw | ConvertFrom-Json
+        if ($s.AccountMinutes) { return $s.AccountMinutes }
+    } catch { }
+    return @{}
+}
 function Get-CmoTokenRemainingHours {
     param([object]$Accounts)
-    # longest-lived token across all authenticated providers (cline / cline-pass)
+    # longest-lived token across all signed-in accounts (cline / cline-pass)
     $best = $null
     foreach ($a in @($Accounts)) {
         if (-not $a -or -not $a.ExpiresAtMs) { continue }
@@ -535,9 +586,26 @@ function Get-CmoSnapshot {
         TokenRemainingHours = (Get-CmoTokenRemainingHours -Accounts $accounts)
         RecentSessions = (Get-CmoRecentSessions -Count 8)
         DynamicFree = $null
+        LiveAccount = $null
     }
+    $acctMin = Get-CmoAccountMinutes
     if ($state) {
         $snap.DynamicFree = Get-CmoDynamicFreeModels -Routing $Routing
+        $liveEmail = $null
+        try {
+            $ap = $state.ActProvider
+            $hit = @($accounts | Where-Object { $_.Provider -eq $ap -and $_.Email })
+            if ($hit.Count -gt 0) { $liveEmail = $hit[0].Email }
+        } catch { }
+        if ($liveEmail) {
+            $key = ($liveEmail + '|' + [string]$state.ActModel)
+            $m = $acctMin[$liveEmail]
+            if ($null -eq $m) { $m = $acctMin[$key] }
+            if ($null -eq $m) { $m = 0 }
+            $snap.LiveAccount = [pscustomobject]@{
+                Email = $liveEmail; Model = $state.ActModel; Tier = (Get-CmoModelTier -Model $state.ActModel -Provider $state.ActProvider -Routing $Routing); UsedMin = [double]$m
+            }
+        }
         foreach ($mode in 'Plan','Act') {
             $provider = $state.($mode + 'Provider')
             $model = $state.($mode + 'Model')
