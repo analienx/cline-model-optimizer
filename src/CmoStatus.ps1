@@ -303,7 +303,7 @@ function New-AccountRow([object]$r) {
     $emailT.Margin = '0,0,7,0'
     [void]$nameStack.Children.Add($emailT)
     if ($r.Sources -contains 'cline-file') { [void]$nameStack.Children.Add((New-Pill 'cline login' $teal)) }
-    else { [void]$nameStack.Children.Add((New-Pill 'added' $dim)) }
+    else { [void]$nameStack.Children.Add((New-Pill 'tracked' $dim)) }
     [void]$g.Children.Add($nameStack)
     [System.Windows.Controls.Grid]::SetColumn($nameStack, 1)
     $live = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; VerticalAlignment = 'Center' }
@@ -420,7 +420,7 @@ function Render-Ladder {
     $steps = @($eff.Steps)
     $dyn = $eff.Dynamic
 
-    $ladderCard.Sub.Text = ('1 = best free. pin = keep, arrows = order, Use = write into Cline   |   free list: ' + [string]$dyn.Source + $(if ($dyn.Fresh) { ' (live)' } else { ' (cached)' }))
+    $ladderCard.Sub.Text = '1 = best free   |   Use writes it into Cline   |   ▲▼ order   |   ✕ remove'
 
     $rank = 0
     foreach ($s in $steps) {
@@ -503,19 +503,8 @@ function Render-Active([object]$snap) {
         [void]$activeCard.Body.Children.Add((New-Text ('driven by ' + $snap.LiveAccount.Email) 11 $dim))
     }
 
-    # the verdict, in plain words
-    $rec = $act.Recommendation
-    $verdict = ''
-    $vCol = $dim
-    if ($rec) {
-        if ($rec.Optimal) { $verdict = 'already on the best free model'; $vCol = $green }
-        else { $verdict = [string]$rec.Message; $vCol = $amber }
-    }
-    if ($verdict) {
-        $vt = New-Text $verdict 11.5 $vCol
-        $vt.Margin = '0,4,0,0'
-        [void]$activeCard.Body.Children.Add($vt)
-    }
+    # NOTE: the verdict/recommendation lives ONLY in the header strip - repeating it
+    # here was pure noise (same sentence twice on one screen).
 }
 
 function New-ModeBlock([string]$label, [object]$m) {
@@ -583,7 +572,6 @@ function Render-System([object]$snap) {
     $lines += ('free models now: ' + @($dyn.Models).Count + '  (' + [string]$dyn.Source + ', ' + $fresh + ')')
     if ($null -ne $dyn.AgeHours) { $lines += ('list age: ' + [string]$dyn.AgeHours + 'h') }
     $lines += ('cline-pass models: ' + @($dyn.ClinePass).Count)
-    $lines += ('daily counters reset in: ' + (Get-CmoDailyResetText))
     if ($dyn.Error) { $lines += ('last fetch error: ' + [string]$dyn.Error) }
     foreach ($l in $lines) { [void]$systemCard.Body.Children.Add((New-Text $l 11 $dim)) }
 
