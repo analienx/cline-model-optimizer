@@ -450,7 +450,9 @@ function Render-Ladder {
             [void]$acts.Children.Add((New-TinyButton ([char]0x25B2) ({ Move-CmoPreferredId $mv -1 }).GetNewClosure() $teal))
             [void]$acts.Children.Add((New-TinyButton ([char]0x25BC) ({ Move-CmoPreferredId $mv 1 }).GetNewClosure() $teal))
             [void]$acts.Children.Add((New-TinyButton ([char]0x2715) ({ Remove-CmoPreferredId $mv }).GetNewClosure() $red))
-        } else {
+        } elseif ($s.tier -eq 'FREE') {
+            # pinning puts a model on the preferred-FREE list - subscription/paid
+            # models don't belong there, so they get no pin button.
             [void]$acts.Children.Add((New-TinyButton '+ pin' ({ Add-CmoPreferredId $mv }).GetNewClosure() $green))
         }
         $rn = $rank

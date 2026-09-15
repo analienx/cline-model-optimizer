@@ -17,20 +17,64 @@ function Get-CmoDefaultBudgetMin { return 120 }
 
 function Get-CmoTodayKey { return (Get-Date -Format 'yyyy-MM-dd') }
 
+function ConvertFrom-CmoJsonTolerant {
+    # Windows PowerShell 5.1's ConvertFrom-Json HARD-FAILS on a JSON member whose
+    # name is an empty string ("": 1) - it says 'use -AsHashTable', which 5.1 does
+    # not have. One such member would otherwise make us lose the WHOLE prefs file,
+    # so on failure we strip empty-name members and retry. (This tool never writes
+    # them; they can only come from hand-editing or an older buggy version.)
+    param([string]$Text)
+    if (-not $Text -or -not $Text.Trim()) { return $null }
+    try { return ($Text | ConvertFrom-Json) } catch { }
+    try {
+        $val = '("(?:[^"\\]|\\.)*"|null|true|false|-?\d+(?:\.\d+)?)'
+        $t = [regex]::Replace($Text, (',\s*""\s*:\s*' + $val), '')
+        $t = [regex]::Replace($t, ('""\s*:\s*' + $val + '\s*,'), '')
+        $t = [regex]::Replace($t, ('""\s*:\s*' + $val), '')
+        return ($t | ConvertFrom-Json)
+    } catch { return $null }
+}
+
+function New-CmoPrefsBag { return (New-Object System.Collections.Specialized.OrderedDictionary) }
+
+function Normalize-CmoPrefsBag {
+    # rebuild a bag keeping only real string keys with a usable value. This also
+    # erases phantom keys (a $null/empty name) left by older versions.
+    param([object]$Bag, [string]$Kind)
+    $out = New-Object System.Collections.Specialized.OrderedDictionary
+    if ($null -eq $Bag) { return $out }
+    foreach ($prop in @($Bag.PSObject.Properties)) {
+        $k = [string]$prop.Name
+        if (-not $k -or -not $k.Trim()) { continue }
+        $v = $prop.Value
+        if ($Kind -eq 'budgets') {
+            $n = 0
+            if (-not [int]::TryParse([string]$v, [ref]$n)) { continue }
+            if ($n -lt 1) { continue }
+            $out[$k] = $n
+        } else {
+            $sv = [string]$v
+            if (-not $sv -or -not $sv.Trim()) { continue }
+            $out[$k] = $sv
+        }
+    }
+    return $out
+}
+
 function Get-CmoAccountPrefs {
     # shape: { budgets: { <email>: <minutes> }, depleted: { <email>: 'yyyy-MM-dd' } }
+    $empty = [pscustomobject]@{ budgets = (New-CmoPrefsBag); depleted = (New-CmoPrefsBag) }
     $fp = Get-CmoAccountPrefsPath
-    if (-not (Test-Path -LiteralPath $fp)) {
-        return [pscustomobject]@{ budgets = [pscustomobject]@{}; depleted = [pscustomobject]@{} }
-    }
+    if (-not (Test-Path -LiteralPath $fp)) { return $empty }
     try {
-        $j = Get-Content -LiteralPath $fp -Raw | ConvertFrom-Json
-        if (-not $j) { throw 'empty' }
-        if (-not $j.budgets)  { $j | Add-Member -NotePropertyName budgets  -NotePropertyValue ([pscustomobject]@{}) -Force }
-        if (-not $j.depleted) { $j | Add-Member -NotePropertyName depleted -NotePropertyValue ([pscustomobject]@{}) -Force }
-        return $j
+        $j = ConvertFrom-CmoJsonTolerant -Text (Get-Content -LiteralPath $fp -Raw)
+        if (-not $j) { return $empty }
+        return [pscustomobject]@{
+            budgets  = (Normalize-CmoPrefsBag -Bag $j.budgets -Kind 'budgets')
+            depleted = (Normalize-CmoPrefsBag -Bag $j.depleted -Kind 'depleted')
+        }
     } catch {
-        return [pscustomobject]@{ budgets = [pscustomobject]@{}; depleted = [pscustomobject]@{} }
+        return $empty
     }
 }
 
@@ -47,7 +91,7 @@ function Get-CmoAccountBudgetMin {
     if (-not $Email) { return (Get-CmoDefaultBudgetMin) }
     $p = Get-CmoAccountPrefs
     $v = $null
-    try { $v = $p.budgets.$Email } catch { $v = $null }
+    try { if ($p.budgets.Contains($Email)) { $v = $p.budgets[$Email] } } catch { $v = $null }
     if ($null -eq $v) { return (Get-CmoDefaultBudgetMin) }
     try { $n = [int]$v } catch { return (Get-CmoDefaultBudgetMin) }
     if ($n -lt 1) { return (Get-CmoDefaultBudgetMin) }
@@ -56,11 +100,11 @@ function Get-CmoAccountBudgetMin {
 
 function Set-CmoAccountBudgetMin {
     param([string]$Email, [int]$Minutes)
-    if (-not $Email) { throw 'email required' }
+    if (-not $Email -or -not $Email.Trim()) { throw 'email required' }
     if ($Minutes -lt 1) { $Minutes = 1 }
     if ($Minutes -gt 1440) { $Minutes = 1440 }
     $p = Get-CmoAccountPrefs
-    $p.budgets | Add-Member -NotePropertyName $Email -NotePropertyValue ([int]$Minutes) -Force
+    $p.budgets[$Email] = [int]$Minutes
     Save-CmoAccountPrefs -Prefs $p | Out-Null
     return [int]$Minutes
 }
@@ -69,20 +113,20 @@ function Test-CmoAccountDepleted {
     param([string]$Email)
     if (-not $Email) { return $false }
     $p = Get-CmoAccountPrefs
-    try { return ([string]$p.depleted.$Email -eq (Get-CmoTodayKey)) } catch { return $false }
+    try {
+        if (-not $p.depleted.Contains($Email)) { return $false }
+        return ([string]$p.depleted[$Email] -eq (Get-CmoTodayKey))
+    } catch { return $false }
 }
 
 function Set-CmoAccountDepleted {
     # marks the account 'used up today' (dashboard), or clears the marker.
+    # clearing REMOVES the key - never leaves an empty value behind.
     param([string]$Email, [switch]$Off)
-    if (-not $Email) { throw 'email required' }
+    if (-not $Email -or -not $Email.Trim()) { throw 'email required' }
     $p = Get-CmoAccountPrefs
-    if ($Off) {
-        # clear = drop the entry entirely (an empty string would be dead weight)
-        try { $p.depleted.PSObject.Properties.Remove($Email) } catch { }
-    } else {
-        $p.depleted | Add-Member -NotePropertyName $Email -NotePropertyValue (Get-CmoTodayKey) -Force
-    }
+    if ($Off) { $p.depleted.Remove($Email) }
+    else { $p.depleted[$Email] = (Get-CmoTodayKey) }
     Save-CmoAccountPrefs -Prefs $p | Out-Null
 }
 function Get-CmoDailyResetSpan {
@@ -135,11 +179,8 @@ function Remove-CmoExtraAccount {
     }
     # drop its saved budget / marker too
     $p = Get-CmoAccountPrefs
-    foreach ($bag in @('budgets', 'depleted')) {
-        try {
-            $names = @($p.$bag.PSObject.Properties.Name)
-            if ($names -contains $Email) { $p.$bag.PSObject.Properties.Remove($Email) }
-        } catch { }
+    foreach ($bag in @($p.budgets, $p.depleted)) {
+        try { if ($bag.Contains($Email)) { $bag.Remove($Email) } } catch { }
     }
     Save-CmoAccountPrefs -Prefs $p | Out-Null
     return $keep
