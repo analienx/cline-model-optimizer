@@ -77,9 +77,13 @@ function New-Card([string]$title, [string]$hint = '') {
     [void]$head.Children.Add($acts)
     [System.Windows.Controls.Grid]::SetColumn($acts, 1)
     [void]$outer.Children.Add($head)
-    $sub = New-Text $hint 11.5 $dim
-    $sub.Margin = '0,3,0,6'
-    [void]$outer.Children.Add($sub)
+    # UX: an empty hint line is 15px of dead space - only add it when it says something
+    $sub = $null
+    if ($hint) {
+        $sub = New-Text $hint 11.5 $dim
+        $sub.Margin = '0,3,0,6'
+        [void]$outer.Children.Add($sub)
+    }
     $body = New-Object System.Windows.Controls.StackPanel
     [void]$outer.Children.Add($body)
     $b = New-Object System.Windows.Controls.Border -Property @{
@@ -180,7 +184,7 @@ $updatedLine.Margin = '0,0,0,10'
 [void]$root.Children.Add($updatedLine)
 
 # ---------- layout: accounts full width, then ladder | active+recent+system ----------
-$acctCard = New-Card 'ACCOUNTS - free budget left today'
+$acctCard = New-Card 'ACCOUNTS - free budget left today' '...'
 [void]$root.Children.Add($acctCard.Card)
 
 $cols = New-RowGrid @('*', '384')
@@ -193,10 +197,10 @@ $rightCol = New-Object System.Windows.Controls.StackPanel
 $rightCol.Margin = '10,0,0,0'
 [void]$root.Children.Add($cols)
 
-$ladderCard = New-Card 'PREFERRED LADDER - free models first'
+$ladderCard = New-Card 'PREFERRED LADDER - free models first' '...'
 $activeCard = New-Card 'WHAT CLINE IS USING'
 $recentCard = New-Card 'RECENT ACTIVITY'
-$systemCard = New-Card 'GUARDIAN & FREE LIST'
+$systemCard = New-Card 'SYSTEM'
 [void]$leftCol.Children.Add($ladderCard.Card)
 [void]$rightCol.Children.Add($activeCard.Card)
 [void]$rightCol.Children.Add($recentCard.Card)
@@ -213,11 +217,11 @@ function Render-Accounts {
     $counts = Get-CmoAccountCounts -Accounts $rows
 
     $tally = ($counts.Green.ToString() + ' green')
-    if ($counts.Amber -gt 0) { $tally += (' | ' + $counts.Amber + ' close to limit') }
-    if ($counts.Red -gt 0) { $tally += (' | ' + $counts.Red + ' used up today') }
+    if ($counts.Amber -gt 0) { $tally += (' · ' + $counts.Amber + ' near limit') }
+    if ($counts.Red -gt 0) { $tally += (' · ' + $counts.Red + ' used up today') }
     if ($counts.SignedIn -eq 0) { $tally = 'no accounts tracked yet' }
-    $acctCard.Sub.Text = ($tally + '   |   resets in ' + (Get-CmoDailyResetText) +
-        '   |   minutes the guardian saw today')
+    # one compact hint line: tally + reset time. Nothing else - the rows say the rest.
+    $acctCard.Sub.Text = ($tally + '   ·   resets in ' + (Get-CmoDailyResetText))
 
     $addBtn = New-TinyButton '+ Add account' { Show-CmoAddAccount } $green
     [void]$acctCard.Actions.Children.Add($addBtn)
@@ -225,13 +229,12 @@ function Render-Accounts {
     foreach ($r in $rows) { [void]$acctCard.Body.Children.Add((New-AccountRow $r)) }
 
     $unscored = Get-CmoUnscoredProviders -Accounts $acc
-    if ($unscored.Count -gt 0) {
-        $n = New-Text ('not signed in (unscored, hidden): ' + ($unscored -join ', ')) 10.5 $dim
-        $n.Margin = '2,2,0,0'
-        [void]$acctCard.Body.Children.Add($n)
-    }
-    $foot = 'Cline has no quota API - the counter is what the guardian observed today. Mark an account used up when Cline reports its free tier is done.'
-    [void]$acctCard.Body.Children.Add((New-Text $foot 10.5 $dim))
+    # UX: two long footnotes became ONE short line - 'why' text belongs in tooltips
+    $foot = 'counters reset at midnight · mark an account used up when Cline says its free tier is done'
+    if ($unscored.Count -gt 0) { $foot = ('hidden, not signed in: ' + ($unscored -join ', ') + ' · ' + $foot) }
+    $n = New-Text $foot 10.5 $dim
+    $n.Margin = '2,2,0,0'
+    [void]$acctCard.Body.Children.Add($n)
 }
 
 function Show-CmoAddAccount {
@@ -291,41 +294,36 @@ function Show-CmoBudgetEditor([string]$Email) {
 
 
 function New-AccountRow([object]$r) {
+    # UX audit fix: the old 90px usage column wrapped real API numbers into a
+    # 3-line ragged row. New shape: lamp | (email+pills / dim usage line) | actions.
     $row = New-RowSurface
-    $g = New-RowGrid @('18', '*', '52', '90', 'Auto')
+    $g = New-RowGrid @('18', '*', 'Auto')
     $lamp = New-Object System.Windows.Shapes.Ellipse -Property @{
         Width = 11; Height = 11; Fill = (& $brush (& $healthColor $r.Health)); VerticalAlignment = 'Center' }
     $lamp.ToolTip = ($r.Health + ': ' + $r.HealthLabel)
     [void]$g.Children.Add($lamp)
-    # one line per account: email + provenance pill (no second line = no wasted space)
-    $nameStack = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; VerticalAlignment = 'Center' }
+
+    $mid = New-Object System.Windows.Controls.StackPanel -Property @{ VerticalAlignment = 'Center' }
+    $nameStack = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal' }
     $emailT = New-Text $r.Email 13 $fg 'SemiBold'
     $emailT.Margin = '0,0,7,0'
     [void]$nameStack.Children.Add($emailT)
     if ($r.Sources -contains 'cline-file') { [void]$nameStack.Children.Add((New-Pill 'cline login' $teal)) }
     else { [void]$nameStack.Children.Add((New-Pill 'tracked' $dim)) }
-    [void]$g.Children.Add($nameStack)
-    [System.Windows.Controls.Grid]::SetColumn($nameStack, 1)
-    $live = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; VerticalAlignment = 'Center' }
-    if ($r.Quota -eq 'LIVE') { [void]$live.Children.Add((New-Pill 'LIVE' $green)) }
-    if ($r.DepletedToday) { [void]$live.Children.Add((New-Pill 'USED UP' $red)) }
-    if ($r.AutoDepletedMs) { [void]$live.Children.Add((New-Pill 'CAP HIT (auto)' $red)) }
-    [void]$g.Children.Add($live)
-    [System.Windows.Controls.Grid]::SetColumn($live, 2)
-    $usage = New-Object System.Windows.Controls.StackPanel -Property @{ VerticalAlignment = 'Center'; ToolTip = $r.HealthLabel }
-    # real API numbers when they exist (live account), else the guardian's estimate
-    if ($r.ApiUsage) {
-        [void]$usage.Children.Add((New-Text $r.ApiUsage 12 $fg))
-    } else {
-        [void]$usage.Children.Add((New-Text ('{0:0}m / {1}m' -f $r.UsedMin, $r.BudgetMin) 12 $fg))
-    }
-    $bar = New-Object System.Windows.Controls.ProgressBar -Property @{
-        Minimum = 0; Maximum = 100; Value = $r.Percent; Height = 4; Width = 84
-        Background = (& $brush $bgBadge); Foreground = (& $brush (& $healthColor $r.Health));
-        BorderThickness = '0'; Margin = '0,3,0,0' }
-    [void]$usage.Children.Add($bar)
-    [void]$g.Children.Add($usage)
-    [System.Windows.Controls.Grid]::SetColumn($usage, 3)
+    if ($r.Quota -eq 'LIVE') { [void]$nameStack.Children.Add((New-Pill 'LIVE' $green)) }
+    if ($r.DepletedToday) { [void]$nameStack.Children.Add((New-Pill 'USED UP' $red)) }
+    if ($r.AutoDepletedMs) { [void]$nameStack.Children.Add((New-Pill 'CAP HIT' $red)) }
+    [void]$mid.Children.Add($nameStack)
+    # second dim line: real API numbers for the live account, guardian estimate else
+    $usageTxt = $r.ApiUsage
+    if (-not $usageTxt) { $usageTxt = ('guardian saw {0:0}m of {1}m today' -f $r.UsedMin, $r.BudgetMin) }
+    $u = New-Text $usageTxt 10.5 $dim
+    $u.Margin = '0,2,0,0'
+    $u.ToolTip = $r.HealthLabel
+    [void]$mid.Children.Add($u)
+    [void]$g.Children.Add($mid)
+    [System.Windows.Controls.Grid]::SetColumn($mid, 1)
+
     $cell = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; HorizontalAlignment = 'Right'; VerticalAlignment = 'Center' }
     $email = [string]$r.Email
     $bBudget = New-TinyButton ('budget ' + [int]$r.BudgetMin + 'm') ({ Show-CmoBudgetEditor -Email $email }).GetNewClosure() $teal
@@ -346,7 +344,7 @@ function New-AccountRow([object]$r) {
         [void]$cell.Children.Add($bRemove)
     }
     [void]$g.Children.Add($cell)
-    [System.Windows.Controls.Grid]::SetColumn($cell, 4)
+    [System.Windows.Controls.Grid]::SetColumn($cell, 2)
     $row.Child = $g
     return $row
 }
@@ -444,7 +442,8 @@ function Render-Ladder {
         [void]$line1.Children.Add((New-Text ([string]$s.model) 13.5 $fg 'SemiBold'))
         [void]$line1.Children.Add((New-Pill ([string]$s.tier) (& $tierColor $s.tier)))
         if ($s.thinking -and $s.thinking -ne 'off') { [void]$line1.Children.Add((New-Pill ('think:' + $s.thinking) $dim)) }
-        if ($isPinned) { [void]$line1.Children.Add((New-Pill 'PINNED' $teal)) }
+        # UX audit fix: no PINNED pill - every preferred row would carry it (pure
+        # noise); the ▲▼✕ buttons already mark pinned rows.
         if (-not $s.live) { [void]$line1.Children.Add((New-Pill 'not live' $red)) }
         # inferred cap for this model (free usage stopped while work continued)
         $caps = Get-CmoInferredCaps -State (Get-CmoUsageState)
@@ -541,18 +540,24 @@ function New-ModeBlock([string]$label, [object]$m) {
 # ---------- RECENT ACTIVITY ----------
 function Render-Recent([object]$snap) {
     Clear-Body $recentCard
+    # UX audit fix: 'RECENT' showed days-old entries. Today's sessions only -
+    # yesterday's work is not 'recent' and only steals fold space.
+    $dayStart = (Get-Date).Date
     $shown = 0
     foreach ($s in @($snap.RecentSessions)) {
+        $start = $null
+        try { $start = ([datetime]$s.StartedAt).ToLocalTime() } catch { }
+        if ($start -and $start -lt $dayStart) { continue }
         if ($shown -ge 6) { break }
         $shown++
         $tier = Get-CmoModelTier -Model $s.Model -Provider $s.Provider -Routing $script:routing
         $when = '?'
-        if ($s.StartedAt) { $when = ([datetime]$s.StartedAt).ToLocalTime().ToString('MM-dd HH:mm') }
+        if ($s.StartedAt) { $when = ([datetime]$s.StartedAt).ToLocalTime().ToString('HH:mm') }
         $title = [string]$s.Title
         if ($title -and $title.Length -gt 46) { $title = $title.Substring(0, 46) + '...' }
         if (-not $title) { $title = '(untitled)' }
         $row = New-RowSurface
-        $g = New-RowGrid @('84', '*', 'Auto')
+        $g = New-RowGrid @('60', '*', 'Auto')
         [void]$g.Children.Add((New-Text $when 11 $dim))
         $mid = New-Object System.Windows.Controls.StackPanel -Property @{ VerticalAlignment = 'Center' }
         [void]$mid.Children.Add((New-Text $title 11.5 $fg))
@@ -566,7 +571,7 @@ function Render-Recent([object]$snap) {
         $row.Child = $g
         [void]$recentCard.Body.Children.Add($row)
     }
-    if ($shown -eq 0) { [void]$recentCard.Body.Children.Add((New-Text 'no recent sessions' 11 $dim)) }
+    if ($shown -eq 0) { [void]$recentCard.Body.Children.Add((New-Text 'no Cline sessions today' 11 $dim)) }
 }
 
 
@@ -590,26 +595,23 @@ function Render-System([object]$snap) {
     $lines += ('cline-pass models: ' + @($dyn.ClinePass).Count)
     if ($dyn.Error) { $lines += ('last fetch error: ' + [string]$dyn.Error) }
     $lines += (Get-CmoUsageSummaryLine)
-    # pending automatic switch (applies itself the moment VS Code closes)
-    $swPlan = Get-CmoAutoSwitchPlan -Routing $script:routing -Act $snap.Act -UsageState (Get-CmoUsageState)
-    if ($swPlan) {
-        $lines += ('auto-switch wanted: ' + $swPlan.From + ' -> ' + $swPlan.To + ' (' + $swPlan.Reason + '; applies when VS Code closes)')
-    }
+    # the pending switch plan now lives in the HEADER (above the fold) - no
+    # duplicate line here.
     foreach ($l in $lines) { [void]$systemCard.Body.Children.Add((New-Text $l 11 $dim)) }
 
-    $log = ''
-    if (Test-Path -LiteralPath $gLog) { $log = ((Get-Content -LiteralPath $gLog -Tail 6) -join "`n") }
-    if ($log) {
-        $lt = New-Text $log 10 '#6B7280'
-        $lt.FontFamily = 'Consolas'
-        $lt.Margin = '0,6,0,0'
-        [void]$systemCard.Body.Children.Add($lt)
-    }
+    # UX audit fix: the raw 6-line guardian log dump (141px of dev-console text)
+    # pushed everything else below the fold. The full log stays on disk at
+    # %LOCALAPPDATA%\ClineModelOptimizer\guardian.log.
 }
 
 # ---------- header actions + refresh ----------
 [void]$headActs.Children.Add((New-TinyButton 'Refresh' { Invoke-Refresh } $teal))
-[void]$headActs.Children.Add((New-TinyButton 'Use #1 best free' { Start-CmoApply -Rank 1 } $green))
+# UX audit fix: 'Use #1' blindly applied the TOP of the ladder even when that
+# model is capped. This button applies the CAP-AWARE plan target instead.
+[void]$headActs.Children.Add((New-TinyButton 'Apply next' {
+        $p = Get-CmoAutoSwitchPlan -Routing $script:routing -Act (Get-CmoSnapshot -Routing $script:routing).Act -UsageState (Get-CmoUsageState)
+        if ($p) { Start-CmoApply -Rank ([int]$p.Rank) } else { Start-CmoApply -Rank 1 }
+    } $green))
 
 function Invoke-Refresh {
     $snap = Get-CmoSnapshot -Routing $script:routing
@@ -619,19 +621,22 @@ function Invoke-Refresh {
     Render-Recent $snap
     Render-System $snap
 
-    # one-line verdict: optimal (green) / suboptimal (amber) / paid (red)
+    # UX audit fix: the old status line was a 956px run-on sentence that could
+    # even RECOMMEND a capped model, and the pending switch plan was buried at
+    # y=809 below the fold. Now: short verdict + the NEXT ACTION on line one.
     $v = 'no Cline state found - open Cline in VS Code once'
     $vCol = $red
+    $vTip = ''
     if ($snap.StateExists -and $snap.Act) {
         $tier = [string]$snap.Act.Tier
         if ($snap.Act.Recommendation -and $snap.Act.Recommendation.Optimal) {
             $v = 'on the best free model'
             $vCol = $green
         } elseif ($tier -eq 'FREE') {
-            $v = 'free model in use, but not the top of the ladder'
+            $v = 'free model in use - not the best free'
             $vCol = $amber
         } elseif ($tier -eq 'SUBSCRIPTION') {
-            $v = 'subscription model in use - a free model is available'
+            $v = 'subscription model in use'
             $vCol = $amber
         } elseif ($tier -eq 'PAID') {
             $v = 'PAID model in use'
@@ -640,24 +645,46 @@ function Invoke-Refresh {
             $v = 'unknown tier in use'
             $vCol = $amber
         }
-        $msg = [string]$snap.Act.Recommendation.Message
-        if ($msg) { $v += '  -  ' + $msg }
+        $vTip = [string]$snap.Act.Recommendation.Message
+    }
+    # the action line: cap-aware switch plan, visible WITHOUT scrolling
+    $plan = $null
+    try { $plan = Get-CmoAutoSwitchPlan -Routing $script:routing -Act $snap.Act -UsageState (Get-CmoUsageState) } catch { }
+    if ($plan) {
+        $vCol = $amber
+        $reason = switch ([string]$plan.Reason) {
+            'cap'             { 'free tier used up' }
+            'all-free-capped' { 'all free used up today' }
+            default           { 'free model available' }
+        }
+        $v = ($v + '   ->   next: ' + $plan.To + ' (' + $reason + '; auto-applies when VS Code closes, or Apply next)')
+    } elseif ($snap.StateExists -and $snap.Act -and ([string]$snap.Act.Tier) -eq 'FREE') {
+        # no plan + free in use: either the best AVAILABLE free (green) or capped
+        # with nothing left today (the ladder's #1 being capped is not your fault)
+        $caps = $null
+        try { $caps = Get-CmoInferredCaps -State (Get-CmoUsageState) } catch { }
+        $cur = Get-CmoModelCoreId -Id ([string]$snap.Act.Model)
+        if ($caps -and $caps.Contains($cur)) {
+            $v = 'free tier used up for this model - nothing free left today'
+            $vCol = $red
+        } else {
+            $v = 'on the best available free model'
+            $vCol = $green
+        }
     }
     $statusLine.Text = $v
     $statusLine.Foreground = (& $brush $vCol)
+    $statusLine.ToolTip = $vTip
     $pillWord = 'CHECK'
     if ($vCol -eq $green) { $pillWord = 'OPTIMAL' } elseif ($vCol -eq $amber) { $pillWord = 'SUBOPTIMAL' }
     $pillText.Text = $pillWord
     $pillText.Foreground = (& $brush $vCol)
     $pillBorder.BorderBrush = (& $brush $vCol)
-    $live = 'n/a'
-    if ($snap.Act) { $live = [string]$snap.Act.Model }
-    $srcName = 'n/a'
-    if ($snap.DynamicFree) { $srcName = [string]$snap.DynamicFree.Source }
+    # UX audit fix: 'in use'/'free list' duplicated their own cards - keep only
+    # freshness signals here.
     $gWhen = 'never'
     if (Test-Path -LiteralPath $gLog) { $gWhen = (Get-Item $gLog).LastWriteTime.ToString('HH:mm') }
-    $updatedLine.Text = ('updated ' + (Get-Date -Format 'HH:mm:ss') + '   |   in use: ' + $live +
-        '   |   free list: ' + $srcName + '   |   guardian last ran: ' + $gWhen)
+    $updatedLine.Text = ('updated ' + (Get-Date -Format 'HH:mm') + '   ·   guardian ran ' + $gWhen)
 }
 
 Invoke-Refresh

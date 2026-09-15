@@ -462,13 +462,13 @@ function Get-CmoUsageTodayForEmail {
 }
 
 function Get-CmoUsageSummaryLine {
-    # one compact line for the system card
+    # one compact line for the system card. The live account's email is already
+    # shown on the LIVE accounts row and the 'driven by' line - not repeated here.
     $st = Get-CmoUsageState
     $parts = @()
-    if ($st.email) { $parts += ('live: ' + [string]$st.email) }
     if ($st.fetchedAt) { $parts += ('fetched ' + ([datetime]$st.fetchedAt).ToString('HH:mm')) }
     if ($null -ne $st.balanceCents) { $parts += ('credits $' + ('{0:N2}' -f ([long]$st.balanceCents / 100.0))) }
     if ($st.lastError) { $parts += ('err: ' + [string]$st.lastError) }
     if ($parts.Count -eq 0) { return 'usage API: no data yet' }
-    return ('usage API: ' + ($parts -join '  |  '))
+    return ('usage API: ' + ($parts -join '  ·  '))
 }
