@@ -99,6 +99,22 @@ if ($elapsedMin -gt 0 -and $elapsedMin -lt 30) {
 }
 if ($state.TierDate -ne $today) { $state.AccountMinutes = @{} }
 
+# ---- automatic usage + cap-hit detection (Cline usage API + transcripts) ----
+# never fatal: on any failure the dashboard keeps the last good cache.
+try {
+    Invoke-CmoUsageRefresh | Out-Null
+    $u = Get-CmoUsageState
+    $models = 0
+    try { $models = @($u.perModel.Keys).Count } catch { }
+    Write-Log ("usage API: {0} models today, fetched={1}{2}" -f $models, [bool]$u.fetchedAt,
+        $(if ($u.lastError) { ' err=' + $u.lastError } else { '' }))
+    try {
+        foreach ($ae in @($u.autoAccounts.Keys)) {
+            Write-Log ('cap hit detected (auto): ' + $ae)
+        }
+    } catch { }
+} catch { Write-Log ('usage refresh failed: ' + $_.Exception.Message) }
+
 # ---- evaluate ----
 $act = $snap.Act
 $dynCount = @($snap.DynamicFree.Models).Count

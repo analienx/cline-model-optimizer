@@ -236,6 +236,24 @@ function Get-CmoAccountSummary {
         $h = Get-CmoAccountHealth -Email $g.Email -UsedMin $g.UsedMin -SignedIn $true
         $g.Health = $h.State; $g.HealthLabel = $h.Label
         $g.BudgetMin = $h.Budget; $g.Percent = $h.Percent; $g.DepletedToday = $h.Depleted
+        # automatic detection outranks the estimated health
+        $autoAt = Get-CmoAutoDepletedInfo -Email $g.Email
+        $g | Add-Member -NotePropertyName AutoDepletedMs -NotePropertyValue $autoAt -Force
+        if ($autoAt) {
+            $g.Health = 'RED'
+            $g.HealthLabel = ('free cap hit (auto-detected ' + (ConvertTo-CmoEpochLocal -Ms ([long]$autoAt)).ToString('HH:mm') + ')')
+        }
+        $g | Add-Member -NotePropertyName ApiUsage -NotePropertyValue '' -Force
+        # LIVE account (token owner): show the account TOTAL from the usage API;
+        # other accounts: fall back to a per-model line if their model was seen.
+        $tot = Get-CmoUsageTodayForEmail -Email $g.Email
+        if ($tot) { $g.ApiUsage = $tot }
+        else {
+            foreach ($mid in @($g.Models)) {
+                $u = Get-CmoUsageTodayForModel -Model ([string]$mid)
+                if ($u) { $g.ApiUsage = $u; break }
+            }
+        }
     }
     $qRank = @{ 'LIVE' = 0; 'TRACKED' = 1; 'OFF' = 2 }
     $hRank = @{ 'GREEN' = 0; 'AMBER' = 1; 'RED' = 2; 'OFF' = 3 }

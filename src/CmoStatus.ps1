@@ -309,10 +309,16 @@ function New-AccountRow([object]$r) {
     $live = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; VerticalAlignment = 'Center' }
     if ($r.Quota -eq 'LIVE') { [void]$live.Children.Add((New-Pill 'LIVE' $green)) }
     if ($r.DepletedToday) { [void]$live.Children.Add((New-Pill 'USED UP' $red)) }
+    if ($r.AutoDepletedMs) { [void]$live.Children.Add((New-Pill 'CAP HIT (auto)' $red)) }
     [void]$g.Children.Add($live)
     [System.Windows.Controls.Grid]::SetColumn($live, 2)
     $usage = New-Object System.Windows.Controls.StackPanel -Property @{ VerticalAlignment = 'Center'; ToolTip = $r.HealthLabel }
-    [void]$usage.Children.Add((New-Text ('{0:0}m / {1}m' -f $r.UsedMin, $r.BudgetMin) 12 $fg))
+    # real API numbers when they exist (live account), else the guardian's estimate
+    if ($r.ApiUsage) {
+        [void]$usage.Children.Add((New-Text $r.ApiUsage 12 $fg))
+    } else {
+        [void]$usage.Children.Add((New-Text ('{0:0}m / {1}m' -f $r.UsedMin, $r.BudgetMin) 12 $fg))
+    }
     $bar = New-Object System.Windows.Controls.ProgressBar -Property @{
         Minimum = 0; Maximum = 100; Value = $r.Percent; Height = 4; Width = 84
         Background = (& $brush $bgBadge); Foreground = (& $brush (& $healthColor $r.Health));
@@ -325,8 +331,8 @@ function New-AccountRow([object]$r) {
     $bBudget = New-TinyButton ('budget ' + [int]$r.BudgetMin + 'm') ({ Show-CmoBudgetEditor -Email $email }).GetNewClosure() $teal
     $bBudget.ToolTip = ('daily free budget for ' + $email)
     [void]$cell.Children.Add($bBudget)
-    if ($r.DepletedToday) {
-        $bClear = New-TinyButton 'clear used-up' ({ Set-CmoAccountDepleted -Email $email -Off; Render-Accounts }).GetNewClosure() $amber
+    if ($r.DepletedToday -or $r.AutoDepletedMs) {
+        $bClear = New-TinyButton 'clear used-up' ({ Set-CmoAccountDepleted -Email $email -Off; Clear-CmoAutoDepleted -Email $email; Render-Accounts }).GetNewClosure() $amber
         $bClear.ToolTip = ('clear the used-up mark for ' + $email)
         [void]$cell.Children.Add($bClear)
     } else {
@@ -441,7 +447,10 @@ function Render-Ladder {
         if ($isPinned) { [void]$line1.Children.Add((New-Pill 'PINNED' $teal)) }
         if (-not $s.live) { [void]$line1.Children.Add((New-Pill 'not live' $red)) }
         [void]$mid.Children.Add($line1)
-        [void]$mid.Children.Add((New-Text (([string]$s.provider) + '  |  ' + [string]$s.source) 10.5 $dim))
+        $meta = ([string]$s.provider) + '  |  ' + [string]$s.source
+        $u = Get-CmoUsageTodayForModel -Model ([string]$s.model)
+        if ($u) { $meta += '  |  ' + $u }
+        [void]$mid.Children.Add((New-Text $meta 10.5 $dim))
         [void]$g.Children.Add($mid)
         [System.Windows.Controls.Grid]::SetColumn($mid, 1)
         $acts = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; HorizontalAlignment = 'Right'; VerticalAlignment = 'Center' }
@@ -575,6 +584,7 @@ function Render-System([object]$snap) {
     if ($null -ne $dyn.AgeHours) { $lines += ('list age: ' + [string]$dyn.AgeHours + 'h') }
     $lines += ('cline-pass models: ' + @($dyn.ClinePass).Count)
     if ($dyn.Error) { $lines += ('last fetch error: ' + [string]$dyn.Error) }
+    $lines += (Get-CmoUsageSummaryLine)
     foreach ($l in $lines) { [void]$systemCard.Body.Children.Add((New-Text $l 11 $dim)) }
 
     $log = ''

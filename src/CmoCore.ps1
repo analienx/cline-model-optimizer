@@ -9,6 +9,8 @@ function Get-CmoDataDir {
 
 # account quota view (per-account daily budget, 'used up today' marker, health)
 . (Join-Path $PSScriptRoot 'CmoAccounts.ps1')
+# real usage from Cline's API + automatic cap-hit detection from transcripts
+. (Join-Path $PSScriptRoot 'CmoUsage.ps1')
 
 function Get-CmoRoutingConfig {
     param([string]$ConfigPath)
@@ -209,6 +211,17 @@ function Get-CmoAccounts {
                 $a | Add-Member -NotePropertyName BudgetMin -NotePropertyValue $h.Budget -Force
                 $a | Add-Member -NotePropertyName Percent -NotePropertyValue $h.Percent -Force
                 $a | Add-Member -NotePropertyName DepletedToday -NotePropertyValue $h.Depleted -Force
+                # automatic cap-hit evidence (transcript scan) + real API usage
+                $autoAt = Get-CmoAutoDepletedInfo -Email $a.Email
+                $a | Add-Member -NotePropertyName AutoDepletedMs -NotePropertyValue $autoAt -Force
+                if ($autoAt) {
+                    $a.Health = 'RED'
+                    $when = (ConvertTo-CmoEpochLocal -Ms ([long]$autoAt)).ToString('HH:mm')
+                    $a.HealthLabel = ('free cap hit (auto-detected ' + $when + ')')
+                }
+                $api = ''
+                if ($a.Model) { $api = Get-CmoUsageTodayForModel -Model ([string]$a.Model) }
+                $a | Add-Member -NotePropertyName ApiUsage -NotePropertyValue $api -Force
             } catch { }
         }
     } catch { }
