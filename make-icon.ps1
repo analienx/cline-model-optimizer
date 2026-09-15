@@ -39,18 +39,29 @@ foreach ($size in 16, 24, 32, 48, 64, 128, 256) {
     $cx = $size / 2.0; $cy = $size / 2.0
 
     # big teal 'C' glyph centered (the product mark; reads at 16px)
-    $fontPx = [Math]::Max(8, [int]($size * 0.62))
+    # 0.80em keeps the cap-height filling most of the tile so the 'C' is obvious
+    # even at 16px, without touching the rounded border.
+    $fontPx = [Math]::Max(10, [int]($size * 0.80))
     $font = New-Object System.Drawing.Font ('Segoe UI'), $fontPx, ([System.Drawing.FontStyle]::Bold), ([System.Drawing.GraphicsUnit]::Pixel)
     $fgBrush = New-Object System.Drawing.SolidBrush $teal
     $sf = New-Object System.Drawing.StringFormat
     $sf.Alignment = 'Center'; $sf.LineAlignment = 'Center'
-    $textRect = New-Object System.Drawing.RectangleF 0, (-($size * 0.05)), $size, $size
+    $textRect = New-Object System.Drawing.RectangleF 0, (-($size * 0.03)), $size, $size
     $g.DrawString('C', $font, $fgBrush, $textRect, $sf)
 
-    # status dot bottom-right
-    $dotR = [Math]::Max(2, [int]($size * 0.10))
+    # status dot bottom-right: smaller, with a navy ring so it reads as a lamp
+    # rather than a blob merged into the 'C'.
+    $dotR = [Math]::Max(2, [int]($size * 0.085))
+    $dcx = $rect.Right - ($dotR * 2.6)
+    $dcy = $rect.Bottom - ($dotR * 2.6)
+    if ($size -ge 32) {
+        $ringBrush = New-Object System.Drawing.SolidBrush $card
+        $ringRect = New-Object System.Drawing.RectangleF ($dcx - $dotR * 1.55), ($dcy - $dotR * 1.55), ($dotR * 3.1), ($dotR * 3.1)
+        $g.FillEllipse($ringBrush, $ringRect)
+        $ringBrush.Dispose()
+    }
     $dotBrush = New-Object System.Drawing.SolidBrush $green
-    $dotRect = New-Object System.Drawing.Rectangle ($rect.Right - 3*$dotR), ($rect.Bottom - 3*$dotR), (2*$dotR), (2*$dotR)
+    $dotRect = New-Object System.Drawing.RectangleF ($dcx - $dotR), ($dcy - $dotR), ($dotR * 2), ($dotR * 2)
     $g.FillEllipse($dotBrush, $dotRect)
     $dotBrush.Dispose()
 
