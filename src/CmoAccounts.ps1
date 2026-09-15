@@ -243,6 +243,21 @@ function Get-CmoAccountSummary {
             $g.Health = 'RED'
             $g.HealthLabel = ('free cap hit (auto-detected ' + (ConvertTo-CmoEpochLocal -Ms ([long]$autoAt)).ToString('HH:mm') + ')')
         }
+        # inferred cap: the usage feed shows a free model that stopped while work
+        # continued (Cline's cap error itself is UI-only and never hits disk).
+        # Only the token owner (LIVE account) has usage data.
+        if ($g.Health -ne 'RED') {
+            $uSt = Get-CmoUsageState
+            if ($uSt.email -and (([string]$uSt.email).ToLowerInvariant() -eq ([string]$g.Email).ToLowerInvariant())) {
+                $caps = Get-CmoInferredCaps -State $uSt
+                if ($caps.Count -gt 0) {
+                    $g.Health = 'RED'
+                    $capKeys = @($caps.Keys)
+                    $last = [long]$caps[$capKeys[0]]
+                    $g.HealthLabel = ('free cap hit (inferred: free usage stopped ' + (ConvertTo-CmoEpochLocal -Ms $last).ToString('HH:mm') + ')')
+                }
+            }
+        }
         $g | Add-Member -NotePropertyName ApiUsage -NotePropertyValue '' -Force
         # LIVE account (token owner): show the account TOTAL from the usage API;
         # other accounts: fall back to a per-model line if their model was seen.

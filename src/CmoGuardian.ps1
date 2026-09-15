@@ -109,6 +109,12 @@ try {
     Write-Log ("usage API: {0} models today, fetched={1}{2}" -f $models, [bool]$u.fetchedAt,
         $(if ($u.lastError) { ' err=' + $u.lastError } else { '' }))
     try {
+        $caps = Get-CmoInferredCaps -State $u
+        foreach ($ck in @($caps.Keys)) {
+            Write-Log ('cap likely (inferred): ' + $ck + ' last used ' + (ConvertTo-CmoEpochLocal -Ms ([long]$caps[$ck])).ToString('HH:mm'))
+        }
+    } catch { }
+    try {
         foreach ($ae in @($u.autoAccounts.Keys)) {
             Write-Log ('cap hit detected (auto): ' + $ae)
         }

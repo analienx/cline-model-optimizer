@@ -446,6 +446,11 @@ function Render-Ladder {
         if ($s.thinking -and $s.thinking -ne 'off') { [void]$line1.Children.Add((New-Pill ('think:' + $s.thinking) $dim)) }
         if ($isPinned) { [void]$line1.Children.Add((New-Pill 'PINNED' $teal)) }
         if (-not $s.live) { [void]$line1.Children.Add((New-Pill 'not live' $red)) }
+        # inferred cap for this model (free usage stopped while work continued)
+        $caps = Get-CmoInferredCaps -State (Get-CmoUsageState)
+        if ($caps.Contains((Get-CmoModelCoreId -Id ([string]$s.model)))) {
+            [void]$line1.Children.Add((New-Pill 'CAP LIKELY' $red))
+        }
         [void]$mid.Children.Add($line1)
         $meta = ([string]$s.provider) + '  |  ' + [string]$s.source
         $u = Get-CmoUsageTodayForModel -Model ([string]$s.model)

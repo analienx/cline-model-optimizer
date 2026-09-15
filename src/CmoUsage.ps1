@@ -40,14 +40,31 @@ function ConvertTo-CmoEpochLocal {
     try { return ([DateTimeOffset]::FromUnixTimeMilliseconds($Ms)).LocalDateTime } catch { return (Get-Date) }
 }
 
+function Get-CmoModelCoreId {
+    # canonical core id so config ids, API raw_models and display names all
+    # match: 'cline-free/muse-spark-1.3-contributor', 'zai/muse-spark-1.3' and
+    # 'Muse Spark 1.3 Contributor' all reduce to a comparable key.
+    param([string]$Id)
+    $s = [string]$Id
+    if (-not $s) { return '' }
+    $s = $s.ToLowerInvariant().Trim()
+    $s = $s -replace '\s+', '-'
+    if ($s.Contains('/')) { $s = $s.Substring($s.LastIndexOf('/') + 1) }
+    foreach ($p in @('cline-free-', 'cline-pass-')) {
+        if ($s.StartsWith($p)) { $s = $s.Substring($p.Length) }
+    }
+    return $s
+}
+
 function Get-CmoEmptyUsageState {
     return [pscustomobject]@{
         day = (Get-CmoTodayKey)
         fetchedAt = $null          # ISO when the API was last asked
         email = ''                  # email the current token belongs to
-        perModel = @{}              # '<model>' -> { requests, totalTokens, creditsUsed, lastAt }
-        autoAccounts = @{}          # '<email>'  -> epoch-ms when the cap hit was seen
-        autoModels = @{}            # '<model>'  -> epoch-ms when the cap hit was seen
+        balanceCents = $null        # account credit balance (paid credits)
+        perModel = @{}              # core id -> { display, providerType, requests, totalTokens, creditsUsed, firstAtMs, lastAtMs }
+        autoAccounts = @{}          # '<email>'  -> epoch-ms when a pasted cap error was seen
+        autoModels = @{}            # '<model>'  -> epoch-ms (secondary, from pasted errors)
         lastScanMs = 0              # transcript messages older than this are ignored
         lastScanAt = $null
         lastError = ''
@@ -93,6 +110,7 @@ function Get-CmoUsageState {
             day = [string]$j.day
             fetchedAt = $j.fetchedAt
             email = [string]$j.email
+            balanceCents = $j.balanceCents
             perModel = (ConvertTo-CmoBag -Bag $j.perModel -Kind 'perModel')
             autoAccounts = (ConvertTo-CmoBag -Bag $j.autoAccounts -Kind 'plain')
             autoModels = (ConvertTo-CmoBag -Bag $j.autoModels -Kind 'plain')
@@ -136,8 +154,11 @@ function Get-CmoClineAuth {
 
 # ---- usage API ----
 function Invoke-CmoUsageApiFetch {
-    # live fetch: today's usage per model + the email the token belongs to.
-    # returns $null on failure (caller keeps the cache).
+    # live fetch: today's usage per model + the email/balance of the token's
+    # account. PAGINATION: '?limit=50' + '?cursor=' (verified live; the
+    # extension itself only reads page 1). Items are deduped by id - a wrong
+    # cursor param would otherwise count the same page repeatedly.
+    # Returns $null on failure (caller keeps the cache).
     $auth = Get-CmoClineAuth
     if (-not $auth) { return $null }
     $hdr = @{ Authorization = ('Bearer ' + $auth.Token); 'Content-Type' = 'application/json' }
@@ -149,35 +170,49 @@ function Invoke-CmoUsageApiFetch {
         if ($me.data -and $me.data.email) { $email = [string]$me.data.email }
     } catch { }
 
+    $balanceCents = $null
+    try {
+        $b = Invoke-RestMethod -Uri ($base + '/users/' + $auth.AccountId + '/balance') -Headers $hdr -Method Get -TimeoutSec 15
+        if ($b.data) { $balanceCents = [long]$b.data.balance }
+    } catch { }
+
     $dayStart = (Get-Date).Date
     $perModel = @{}
-    $next = $null
+    $seenIds = @{}
+    $cursor = ''
     $pages = 0
-    while ($pages -lt 20) {
+    while ($pages -lt 30) {
         $pages++
         $u = $null
         try {
-            $uri = $base + '/users/' + $auth.AccountId + '/usages'
-            if ($next) { $uri = $uri + '?nextToken=' + [uri]::EscapeDataString($next) }
+            $uri = $base + '/users/' + $auth.AccountId + '/usages?limit=50'
+            if ($cursor) { $uri = $uri + '&cursor=' + [uri]::EscapeDataString($cursor) }
             $u = Invoke-RestMethod -Uri $uri -Headers $hdr -Method Get -TimeoutSec 20
         } catch { return $null }
         $items = @($u.data.items)
-        $sawFresh = $false
+        $fresh = 0
         foreach ($it in $items) {
+            if ($seenIds.ContainsKey([string]$it.id)) { continue }
+            $seenIds[[string]$it.id] = $true
             $when = [datetime]::MinValue
-            try { $when = [datetime]::Parse(([string]$it.createdAt), [System.Globalization.CultureInfo]::InvariantCulture, 'RoundtripKind') } catch { }
+            try { $when = ([datetime]::Parse(([string]$it.createdAt))).ToLocalTime() } catch { }
             if ($when -ne [datetime]::MinValue) {
-                $local = $when.ToLocalTime()
-                if ($local -lt $dayStart) { continue }
-                $sawFresh = $true
+                if ($when -lt $dayStart) { continue }
+                $fresh++
             }
-            $model = [string]$it.aiModelName
-            if (-not $model) { $model = [string]$it.aiModelTypeName }
-            if (-not $model) { $model = '(unknown model)' }
-            if (-not $perModel.ContainsKey($model)) {
-                $perModel[$model] = @{ requests = 0; totalTokens = 0; creditsUsed = 0.0; lastAt = '' }
+            # canonical key: raw_model beats the display name
+            $raw = ''
+            try { $raw = [string]$it.metadata.raw_model } catch { }
+            $key = Get-CmoModelCoreId -Id $raw
+            if (-not $key) { $key = Get-CmoModelCoreId -Id ([string]$it.aiModelName) }
+            if (-not $key) { $key = 'unknown' }
+            if (-not $perModel.ContainsKey($key)) {
+                $perModel[$key] = @{
+                    display = [string]$it.aiModelName; providerType = [string]$it.aiModelTypeName
+                    requests = 0; totalTokens = 0; creditsUsed = 0.0; firstAtMs = 0; lastAtMs = 0 }
             }
-            $m = $perModel[$model]
+            $m = $perModel[$key]
+            if (-not $m.display) { $m.display = [string]$it.aiModelName }
             $m.requests = [int]$m.requests + 1
             $tok = 0
             try { $tok = [int]$it.totalTokens } catch { }
@@ -185,15 +220,20 @@ function Invoke-CmoUsageApiFetch {
             $cr = 0.0
             try { $cr = [double]$it.creditsUsed } catch { }
             $m.creditsUsed = [math]::Round([double]$m.creditsUsed + $cr, 2)
-            if ($it.createdAt) { $m.lastAt = [string]$it.createdAt }
+            $ts = 0
+            try { $ts = ([DateTimeOffset]::Parse(([string]$it.createdAt))).ToUnixTimeMilliseconds() } catch { }
+            if ($ts -gt 0) {
+                if ($m.firstAtMs -eq 0 -or $ts -lt $m.firstAtMs) { $m.firstAtMs = $ts }
+                if ($ts -gt $m.lastAtMs) { $m.lastAtMs = $ts }
+            }
         }
-        $next = $u.data.nextToken
-        # stop when no token, or the page held nothing from today (newest-first list)
-        if (-not $next) { break }
-        if (-not $sawFresh -and $items.Count -gt 0) { break }
+        $cursor = [string]$u.data.nextToken
+        # stop when no cursor, or the page held nothing new from today (newest-first)
+        if (-not $cursor) { break }
+        if ($fresh -eq 0) { break }
         if ($items.Count -eq 0) { break }
     }
-    return @{ Email = $email; PerModel = $perModel }
+    return @{ Email = $email; BalanceCents = $balanceCents; PerModel = $perModel }
 }
 # ---- transcript cap-hit scan ----
 function ConvertTo-CmoTextBlocksText {
@@ -332,6 +372,7 @@ function Invoke-CmoUsageRefresh {
             foreach ($k in @($r.PerModel.Keys)) { $bag[$k] = $r.PerModel[$k] }
             $st.perModel = $bag
             $st.email = [string]$r.Email
+            $st.balanceCents = $r.BalanceCents
             $st.fetchedAt = (Get-Date).ToString('o')
             $st.lastError = ''
         } else {
@@ -342,39 +383,53 @@ function Invoke-CmoUsageRefresh {
     return $st
 }
 
+function Get-CmoInferredCaps {
+    # THE automatic depleted signal. Cline's cap error is UI-ONLY (never written
+    # to transcripts, logs or state - verified), so the cap must be inferred from
+    # the usage feed itself: a FREE model that was used heavily today, then STOPPED
+    # while the account kept working, is capped. Returns core id -> lastAtMs.
+    param([object]$State)
+    $now = [long](([DateTimeOffset]::Now).ToUnixTimeMilliseconds())
+    $out = New-Object System.Collections.Specialized.OrderedDictionary
+    try {
+        $latestAny = 0
+        foreach ($k in @($State.perModel.Keys)) { $m = $State.perModel[$k]; if ([long]$m.lastAtMs -gt $latestAny) { $latestAny = [long]$m.lastAtMs } }
+        foreach ($k in @($State.perModel.Keys)) {
+            $m = $State.perModel[$k]
+            if (([string]$m.providerType) -ne 'cline-free') { continue }
+            if ([int]$m.requests -lt 5) { continue }
+            $last = [long]$m.lastAtMs
+            if ($last -le 0) { continue }
+            # stopped >= 45 min ago, and the account kept working afterwards
+            if (($now - $last) -lt 2700000) { continue }
+            if ($latestAny -le $last) { continue }
+            $out[$k] = $last
+        }
+    } catch { }
+    return $out
+}
+
 function Get-CmoUsageTodayForModel {
-    # cached usage line for one model id, e.g. '12 req / 1.4M tok / 3.2 cr today'.
-    # The API's model names can differ slightly from config names
-    # ('cline-pass/glm-5.3' vs 'cline-pass/glm-5.3-flash'), so exact match first,
-    # then a suffix-tolerant match.
+    # cached usage line for one model id, e.g. '45 req / 2.1M tok today (last 09:41)'.
+    # Matching is by canonical core id, so config ids ('cline-free/muse-spark-1.3-
+    # contributor') match API display names ('Muse Spark 1.3 Contributor').
     param([string]$Model)
     if (-not $Model) { return '' }
     $st = Get-CmoUsageState
     try {
-        $want = $Model.ToLowerInvariant()
-        $match = $null
+        $want = Get-CmoModelCoreId -Id $Model
+        if (-not $want) { return '' }
         foreach ($k in @($st.perModel.Keys)) {
-            if (-not $k) { continue }
-            $have = ([string]$k).ToLowerInvariant()
-            if ($have -eq $want) { $match = $st.perModel[$k]; break }
-        }
-        if (-not $match) {
-            foreach ($k in @($st.perModel.Keys)) {
-                if (-not $k) { continue }
-                $have = ([string]$k).ToLowerInvariant()
-                if ($have.StartsWith($want) -or $want.StartsWith($have)) {
-                    # require a '-' or end boundary so 'glm-5.3' can't match 'glm-5.30'
-                    if ($have.StartsWith($want) -and ($have.Length -eq $want.Length -or $have[$want.Length] -eq '-')) { $match = $st.perModel[$k]; break }
-                    if ($want.StartsWith($have) -and ($want.Length -eq $have.Length -or $want[$have.Length] -eq '-')) { $match = $st.perModel[$k]; break }
-                }
+            if ($want -eq ([string]$k)) {
+                $m = $st.perModel[$k]
+                $tok = [double]$m.totalTokens
+                $tokTxt = ('{0:N0}' -f $tok)
+                if ($tok -ge 1000000) { $tokTxt = ('{0:N1}M' -f ($tok / 1000000.0)) }
+                elseif ($tok -ge 1000) { $tokTxt = ('{0:N1}k' -f ($tok / 1000.0)) }
+                $line = ('{0} req / {1} tok today' -f [int]$m.requests, $tokTxt)
+                if ([long]$m.lastAtMs -gt 0) { $line += (' (last ' + (ConvertTo-CmoEpochLocal -Ms ([long]$m.lastAtMs)).ToString('HH:mm') + ')') }
+                return $line
             }
-        }
-        if ($match) {
-            $tok = [double]$match.totalTokens
-            $tokTxt = ('{0:N0}' -f $tok)
-            if ($tok -ge 1000000) { $tokTxt = ('{0:N1}M' -f ($tok / 1000000.0)) }
-            elseif ($tok -ge 1000) { $tokTxt = ('{0:N1}k' -f ($tok / 1000.0)) }
-            return ('{0} req / {1} tok / {2} cr today' -f [int]$match.requests, $tokTxt, [double]$match.creditsUsed)
         }
     } catch { }
     return ''
@@ -382,34 +437,37 @@ function Get-CmoUsageTodayForModel {
 
 function Get-CmoUsageTodayForEmail {
     # TOTAL usage today for the account that owns the current token (the LIVE
-    # login) - every usage record the API returns belongs to that one account.
+    # login), split free vs subscription - every usage record the API returns
+    # belongs to that one account.
     param([string]$Email)
     if (-not $Email) { return '' }
     $st = Get-CmoUsageState
     if (-not $st.email -or (([string]$st.email).ToLowerInvariant() -ne ([string]$Email).ToLowerInvariant())) { return '' }
     try {
-        $req = 0; $tok = 0.0; $cr = 0.0
+        $req = 0; $tok = 0.0; $cr = 0.0; $freeReq = 0; $freeTok = 0.0
         foreach ($k in @($st.perModel.Keys)) {
             $m = $st.perModel[$k]
             $req += [int]$m.requests
             $tok += [double]$m.totalTokens
             $cr += [double]$m.creditsUsed
+            if (([string]$m.providerType) -eq 'cline-free') { $freeReq += [int]$m.requests; $freeTok += [double]$m.totalTokens }
         }
         if ($req -eq 0) { return '' }
         $tokTxt = ('{0:N0}' -f $tok)
         if ($tok -ge 1000000) { $tokTxt = ('{0:N1}M' -f ($tok / 1000000.0)) }
         elseif ($tok -ge 1000) { $tokTxt = ('{0:N1}k' -f ($tok / 1000.0)) }
-        return ('{0} req / {1} tok / {2} cr today (API)' -f $req, $tokTxt, [math]::Round($cr, 2))
+        return ('{0} req / {1} tok today (free {2} req) - API' -f $req, $tokTxt, $freeReq)
     } catch { }
     return ''
 }
 
 function Get-CmoUsageSummaryLine {
-    # one compact line for the accounts card footnote / system card
+    # one compact line for the system card
     $st = Get-CmoUsageState
     $parts = @()
     if ($st.email) { $parts += ('live: ' + [string]$st.email) }
     if ($st.fetchedAt) { $parts += ('fetched ' + ([datetime]$st.fetchedAt).ToString('HH:mm')) }
+    if ($null -ne $st.balanceCents) { $parts += ('credits $' + ('{0:N2}' -f ([long]$st.balanceCents / 100.0))) }
     if ($st.lastError) { $parts += ('err: ' + [string]$st.lastError) }
     if ($parts.Count -eq 0) { return 'usage API: no data yet' }
     return ('usage API: ' + ($parts -join '  |  '))
