@@ -75,28 +75,70 @@ function Get-CmoActiveState {
 }
 
 # ---- provider accounts (metadata only - no tokens) ----
+function Get-CmoExtraAccountsPath {
+    return (Join-Path $env:LOCALAPPDATA 'ClineModelOptimizer\extra-accounts.json')
+}
+function Get-CmoExtraAccounts {
+    # Manually tracked accounts: Cline only persists ONE signed-in login on disk,
+    # so the other logins the user rotates between are kept here via Add account.
+    $fp = Get-CmoExtraAccountsPath
+    if (-not (Test-Path -LiteralPath $fp)) { return @() }
+    try { $j = Get-Content -LiteralPath $fp -Raw | ConvertFrom-Json; return @($j) } catch { return @() }
+}
+function Add-CmoExtraAccount {
+    param([string]$Email, [string]$Provider = 'cline', [string]$Note = '')
+    $Email = ([string]$Email).Trim()
+    if (-not $Email) { throw 'email required' }
+    $fp = Get-CmoExtraAccountsPath
+    $list = @(@(Get-CmoExtraAccounts) | Where-Object { $_ -and $_.Email -ne $Email })
+    $list += [pscustomobject]@{ Email = $Email; Provider = $Provider; Note = $Note; AddedAt = (Get-Date -Format 'o') }
+    New-Item -ItemType Directory -Path (Split-Path $fp) -Force | Out-Null
+    ($list | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $fp -Encoding UTF8
+    return $list
+}
 function Get-CmoAccounts {
     $pp = Join-Path (Get-CmoDataDir) 'settings\providers.json'
-    if (-not (Test-Path -LiteralPath $pp)) { return @() }
-    $p = Get-Content -LiteralPath $pp -Raw | ConvertFrom-Json
     $out = @()
-    foreach ($prop in $p.providers.PSObject.Properties) {
-        $s = $prop.Value.settings
-        $email = $null; $accountId = $null; $expiresAt = $null
-        if ($s.auth) {
-            $email = $s.auth.metadata.userInfo.email
-            $accountId = $s.auth.accountId
-            $expiresAt = $s.auth.expiresAt
+    if (Test-Path -LiteralPath $pp) {
+        $p = Get-Content -LiteralPath $pp -Raw | ConvertFrom-Json
+        foreach ($prop in $p.providers.PSObject.Properties) {
+            $s = $prop.Value.settings
+            $email = $null; $accountId = $null; $expiresAt = $null
+            if ($s.auth) {
+                $email = $s.auth.metadata.userInfo.email
+                $accountId = $s.auth.accountId
+                $expiresAt = $s.auth.expiresAt
+            }
+            $out += [pscustomobject]@{
+                Provider  = $prop.Name
+                Model     = $s.model
+                Reasoning = if ($s.reasoning) { $s.reasoning.effort } else { $null }
+                Email     = $email
+                AccountId = $accountId
+                ExpiresAtMs = $expiresAt
+                UpdatedAt = $prop.Value.updatedAt
+                LastUsed  = ($p.lastUsedProvider -eq $prop.Name)
+                Source    = 'cline-file'
+                Note      = ''
+            }
         }
+    }
+    # merge manually added accounts (skip dupes already seen in the cline file)
+    $seen = @(@($out) | ForEach-Object { ([string]$_.Email).ToLowerInvariant() }) | Where-Object { $_ }
+    foreach ($x in @(Get-CmoExtraAccounts)) {
+        if (-not $x -or -not $x.Email) { continue }
+        if ($seen -contains ([string]$x.Email).ToLowerInvariant()) { continue }
         $out += [pscustomobject]@{
-            Provider  = $prop.Name
-            Model     = $s.model
-            Reasoning = if ($s.reasoning) { $s.reasoning.effort } else { $null }
-            Email     = $email
-            AccountId = $accountId
-            ExpiresAtMs = $expiresAt
-            UpdatedAt = $prop.Value.updatedAt
-            LastUsed  = ($p.lastUsedProvider -eq $prop.Name)
+            Provider  = if ($x.Provider) { [string]$x.Provider } else { 'cline' }
+            Model     = $null
+            Reasoning = $null
+            Email     = [string]$x.Email
+            AccountId = $null
+            ExpiresAtMs = $null
+            UpdatedAt = $x.AddedAt
+            LastUsed  = $false
+            Source    = 'added'
+            Note      = if ($x.Note) { [string]$x.Note } else { '' }
         }
     }
     # stable order: cline, cline-pass, then everything else alphabetically

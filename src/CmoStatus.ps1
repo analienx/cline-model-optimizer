@@ -24,7 +24,13 @@ $w.Background = (& $brush $bg)
 $w.FontFamily = 'Segoe UI'
 $iconPath = Join-Path $PSScriptRoot 'cmo-icon.ico'
 if (Test-Path -LiteralPath $iconPath) {
-    try { Add-Type -AssemblyName System.Drawing; $w.Icon = New-Object System.Drawing.Icon ($iconPath) } catch { }
+    try {
+        $uri = New-Object System.Uri ($iconPath, [System.UriKind]::Absolute)
+        $dec = [System.Windows.Media.Imaging.BitmapDecoder]::Create(
+            $uri, [System.Windows.Media.Imaging.BitmapCreateOptions]::PreservePixelFormat,
+            [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+        $w.Icon = $dec.Frames[0]
+    } catch { }
 }
 
 $tierColor = { param($t) switch ($t) { 'FREE' { $green } 'SUBSCRIPTION' { $amber } 'PAID' { $red } default { $dim } } }
@@ -181,14 +187,26 @@ function Invoke-Refresh {
     }
     $heroSub.Text = ($heroBits -join '   |   ')
 
-    foreach ($mode in 'Act','Plan') {
-        $m = $snap.$mode
-        Add-Note $activePanel ($mode.ToUpper() + ' MODE')
+    $actM = $snap.Act; $planM = $snap.Plan
+    $sameMode = ($actM.Provider -eq $planM.Provider -and $actM.Model -eq $planM.Model -and $actM.Reasoning -eq $planM.Reasoning)
+    if ($sameMode) {
+        Add-Note $activePanel 'PLAN = ACT (same)'
+        $m = $actM
         Add-Row $activePanel 'model' (Short-Id $m.Model) (& $tierColor $m.Tier) $m.Tier
         Add-Row $activePanel 'provider' ([string]$m.Provider) $fg $null
         if ($m.Reasoning) { Add-Row $activePanel 'reasoning' ('effort: ' + $m.Reasoning) $fg $null }
         if ($m.Recommendation.Optimal) { Add-Row $activePanel 'verdict' $m.Recommendation.Message $green $null }
         else { Add-Row $activePanel 'verdict' $m.Recommendation.Message $amber $null }
+    } else {
+        foreach ($mode in 'Act','Plan') {
+            $m = $snap.$mode
+            Add-Note $activePanel ($mode.ToUpper() + ' MODE')
+            Add-Row $activePanel 'model' (Short-Id $m.Model) (& $tierColor $m.Tier) $m.Tier
+            Add-Row $activePanel 'provider' ([string]$m.Provider) $fg $null
+            if ($m.Reasoning) { Add-Row $activePanel 'reasoning' ('effort: ' + $m.Reasoning) $fg $null }
+            if ($m.Recommendation.Optimal) { Add-Row $activePanel 'verdict' $m.Recommendation.Message $green $null }
+            else { Add-Row $activePanel 'verdict' $m.Recommendation.Message $amber $null }
+        }
     }
     if ($null -ne $tok) {
         if ($tok -le 0) { Add-Row $activePanel 'auth token' 'EXPIRED - re-sign in' $red $null }
@@ -198,14 +216,17 @@ function Invoke-Refresh {
     }
 
     foreach ($a in @($snap.Accounts)) {
-        if ($a.LastUsed) { Add-Note $accountPanel (($a.Provider.ToUpper()) + '  -  LAST USED') }
-        else { Add-Note $accountPanel ($a.Provider.ToUpper()) }
+        $tag = $a.Provider
+        if ($a.Source -eq 'added') { $tag += ' (added)' }
+        if ($a.LastUsed) { $tag += '  -  LAST USED' }
         $who = if ($a.Email) { $a.Email } else { '(no email on file)' }
-        if ($a.LastUsed) { Add-Row $accountPanel 'account' $who $green $null }
-        else { Add-Row $accountPanel 'account' $who $fg $null }
+        $rowColor = if ($a.LastUsed) { $green } else { $fg }
+        Add-Row $accountPanel $tag $who $rowColor $null
         if ($a.Model) { Add-Row $accountPanel 'model' (Short-Id $a.Model) $dim $null }
+        if ($a.Note) { Add-Note $accountPanel ('note: ' + $a.Note) }
     }
     if (@($snap.Accounts).Count -eq 0) { Add-Note $accountPanel 'No provider accounts found.' }
+    else { Add-Note $accountPanel 'Cline signs in ONE account at a time - use Add account to track the others you rotate between.' }
 
     $rec = $snap.Act.Recommendation
     $freeWord = 'not fresh'
@@ -250,7 +271,41 @@ function New-Button([string]$text, [scriptblock]$onClick) {
     $b.Add_Click($onClick)
     [void]$buttons.Children.Add($b)
 }
+function Show-AddAccountDialog {
+    $d = New-Object System.Windows.Window
+    $d.Title = 'Add account'; $d.Width = 420; $d.Height = 250
+    $d.WindowStartupLocation = 'CenterOwner'; $d.Owner = $w
+    $d.Background = (& $brush $bg)
+    $sp = New-Object System.Windows.Controls.StackPanel -Property @{ Margin = '16' }
+    $d.Content = $sp
+    $mkLabel = { param($s) New-Object System.Windows.Controls.TextBlock -Property @{ Text = $s; Foreground = (& $brush $dim); FontSize = 12; Margin = '0,6,0,2' } }
+    $mkBox = { New-Object System.Windows.Controls.TextBox -Property @{ FontSize = 13; Padding = '6,4'; Background = (& $brush $bgBadge); Foreground = (& $brush $fg); BorderBrush = (& $brush $border) } }
+    [void]$sp.Children.Add((& $mkLabel 'email'))
+    $emailBox = (& $mkBox); [void]$sp.Children.Add($emailBox)
+    [void]$sp.Children.Add((& $mkLabel 'note (optional, e.g. live.com login)'))
+    $noteBox = (& $mkBox); [void]$sp.Children.Add($noteBox)
+    $row = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; Margin = '0,14,0,0' }
+    [void]$sp.Children.Add($row)
+    $ok = New-Object System.Windows.Controls.Button -Property @{ Content = 'Save'; Padding = '18,6'; Margin = '0,0,10,0' }
+    $cancel = New-Object System.Windows.Controls.Button -Property @{ Content = 'Cancel'; Padding = '18,6' }
+    [void]$row.Children.Add($ok); [void]$row.Children.Add($cancel)
+    $ok.Add_Click({ $d.Tag = @{ Email = $emailBox.Text; Note = $noteBox.Text }; $d.DialogResult = $true; $d.Close() })
+    $cancel.Add_Click({ $d.DialogResult = $false; $d.Close() })
+    if ($d.ShowDialog() -eq $true) { return $d.Tag }
+    return $null
+}
 New-Button 'Refresh' { Invoke-Refresh }
+New-Button 'Add account' {
+    $r = Show-AddAccountDialog
+    if ($r -and $r.Email -and $r.Email.Trim()) {
+        try {
+            Add-CmoExtraAccount -Email $r.Email.Trim() -Note ([string]$r.Note) | Out-Null
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message, 'Add account', 'OK', 'Warning') | Out-Null
+        }
+        Invoke-Refresh
+    }
+}
 New-Button 'Refresh free list' {
     Get-CmoDynamicFreeModels -Routing $routing -Refresh | Out-Null
     Invoke-Refresh
