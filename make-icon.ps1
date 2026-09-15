@@ -1,5 +1,5 @@
-# Icon branding: teal gauge-dial ring (4 ticks; filled arc shows free-slot usage)
-# + '$' free symbol + status dot. Distinct from RDC's amber chevron icon.
+# Icon branding: big teal 'C' glyph on navy tile + green status dot.
+# Bold Segoe UI 'C' centered, thin teal edge on the tile. Distinct from RDC's amber chevron.
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
@@ -37,39 +37,15 @@ foreach ($size in 16, 24, 32, 48, 64, 128, 256) {
     }
 
     $cx = $size / 2.0; $cy = $size / 2.0
-    $ringR = $size * 0.30
-    if ($size -ge 24) {
-        $trackW = [Math]::Max(2, [int]($size * 0.075))
-        $trackPen = New-Object System.Drawing.Pen $ringDim, $trackW
-        $g.DrawEllipse($trackPen, ($cx - $ringR), ($cy - $ringR), (2 * $ringR), (2 * $ringR))
-        $trackPen.Dispose()
-        # filled arc: bottom gap (gauge opening) from 40deg to 140deg
-        $fillPen = New-Object System.Drawing.Pen $teal, $trackW
-        $fillPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
-        $fillPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
-        $g.DrawArc($fillPen, ($cx - $ringR), ($cy - $ringR), (2 * $ringR), (2 * $ringR), 140, 260)
-        $fillPen.Dispose()
-        # 4 tick marks on the filled arc (top-left, top, top-right, right)
-        foreach ($deg in 150, 200, 250, 300) {
-            $rad = $deg * [Math]::PI / 180.0
-            $ox = $cx + [Math]::Cos($rad) * $ringR
-            $oy = $cy + [Math]::Sin($rad) * $ringR
-            $ix = $cx + [Math]::Cos($rad) * ($ringR - $trackW * 1.1)
-            $iy = $cy + [Math]::Sin($rad) * ($ringR - $trackW * 1.1)
-            $tickPen = New-Object System.Drawing.Pen $card, ([Math]::Max(1, [int]($size * 0.018)))
-            $g.DrawLine($tickPen, $ox, $oy, $ix, $iy)
-            $tickPen.Dispose()
-        }
-    }
 
-    # '$' free symbol centered inside the dial
-    $fontPx = [Math]::Max(6, [int]($size * 0.42))
+    # big teal 'C' glyph centered (the product mark; reads at 16px)
+    $fontPx = [Math]::Max(8, [int]($size * 0.62))
     $font = New-Object System.Drawing.Font ('Segoe UI'), $fontPx, ([System.Drawing.FontStyle]::Bold), ([System.Drawing.GraphicsUnit]::Pixel)
     $fgBrush = New-Object System.Drawing.SolidBrush $teal
     $sf = New-Object System.Drawing.StringFormat
     $sf.Alignment = 'Center'; $sf.LineAlignment = 'Center'
-    $textRect = New-Object System.Drawing.RectangleF 0, (-($size * 0.04)), $size, $size
-    $g.DrawString('$', $font, $fgBrush, $textRect, $sf)
+    $textRect = New-Object System.Drawing.RectangleF 0, (-($size * 0.05)), $size, $size
+    $g.DrawString('C', $font, $fgBrush, $textRect, $sf)
 
     # status dot bottom-right
     $dotR = [Math]::Max(2, [int]($size * 0.10))

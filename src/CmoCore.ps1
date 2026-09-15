@@ -10,7 +10,38 @@ function Get-CmoDataDir {
 function Get-CmoRoutingConfig {
     param([string]$ConfigPath)
     if (-not $ConfigPath) { $ConfigPath = Join-Path $PSScriptRoot 'model-routing.json' }
-    return (Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json)
+    $cfg = (Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json)
+    # user overrides (dashboard Preferred-models editor) win over bundled config
+    try {
+        $user = Get-CmoUserPreferred
+        if ($user.PreferredFreeModels -and @($user.PreferredFreeModels).Count -gt 0) {
+            $cfg.freeSelection.preferredFreeModels = @($user.PreferredFreeModels)
+        }
+        if ($user.MaxFreeModels -ge 1) { $cfg.freeSelection.maxFreeModels = [int]$user.MaxFreeModels }
+    } catch { }
+    return $cfg
+}
+
+function Get-CmoUserPreferredPath {
+    return (Join-Path $env:LOCALAPPDATA 'ClineModelOptimizer\user-preferred.json')
+}
+function Get-CmoUserPreferred {
+    # user-edited preferred free list (dashboard editor). $null = never customized.
+    $fp = Get-CmoUserPreferredPath
+    if (-not (Test-Path -LiteralPath $fp)) { return $null }
+    try { return (Get-Content -LiteralPath $fp -Raw | ConvertFrom-Json) } catch { return $null }
+}
+function Set-CmoUserPreferred {
+    param([string[]]$PreferredFreeModels, [int]$MaxFreeModels = 0)
+    $fp = Get-CmoUserPreferredPath
+    New-Item -ItemType Directory -Path (Split-Path $fp) -Force | Out-Null
+    $obj = [pscustomobject]@{
+        PreferredFreeModels = @($PreferredFreeModels | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() })
+        MaxFreeModels = [int]$MaxFreeModels
+        UpdatedAt = (Get-Date -Format 'o')
+    }
+    ($obj | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $fp -Encoding UTF8
+    return $obj
 }
 
 # ---- tier classification ----
@@ -86,12 +117,12 @@ function Get-CmoExtraAccounts {
     try { $j = Get-Content -LiteralPath $fp -Raw | ConvertFrom-Json; return @($j) } catch { return @() }
 }
 function Add-CmoExtraAccount {
-    param([string]$Email, [string]$Provider = 'cline', [string]$Note = '')
+    param([string]$Email, [string]$Provider = 'cline')
     $Email = ([string]$Email).Trim()
     if (-not $Email) { throw 'email required' }
     $fp = Get-CmoExtraAccountsPath
     $list = @(@(Get-CmoExtraAccounts) | Where-Object { $_ -and $_.Email -ne $Email })
-    $list += [pscustomobject]@{ Email = $Email; Provider = $Provider; Note = $Note; AddedAt = (Get-Date -Format 'o') }
+    $list += [pscustomobject]@{ Email = $Email; Provider = $Provider; AddedAt = (Get-Date -Format 'o') }
     New-Item -ItemType Directory -Path (Split-Path $fp) -Force | Out-Null
     ($list | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $fp -Encoding UTF8
     return $list
@@ -119,7 +150,7 @@ function Get-CmoAccounts {
                 UpdatedAt = $prop.Value.updatedAt
                 LastUsed  = ($p.lastUsedProvider -eq $prop.Name)
                 Source    = 'cline-file'
-                Note      = ''
+                SignedIn  = [bool]$email
             }
         }
     }
@@ -138,7 +169,7 @@ function Get-CmoAccounts {
             UpdatedAt = $x.AddedAt
             LastUsed  = $false
             Source    = 'added'
-            Note      = if ($x.Note) { [string]$x.Note } else { '' }
+            SignedIn  = $true
         }
     }
     # stable order: cline, cline-pass, then everything else alphabetically

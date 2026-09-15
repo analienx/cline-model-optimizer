@@ -119,6 +119,19 @@ function Add-Note($panel, [string]$text) {
     [void]$panel.Children.Add($n)
 }
 
+function New-SmallButton($panel, [string]$text, [scriptblock]$onClick) {
+    # small inline action button (e.g. per-ladder-rank 'Use #N').
+    # Returns the button so callers can set .Tag (handlers read $this.Tag -
+    # loop variables must NOT be captured: all handlers would see the last value).
+    $b = New-Object System.Windows.Controls.Button -Property @{
+        Content = $text; Padding = '10,2'; Margin = '0,2,0,6'; Cursor = 'Hand'
+        HorizontalAlignment = 'Left'; FontSize = 11.5
+        Background = (& $brush $bgBadge); Foreground = (& $brush $teal); BorderBrush = (& $brush $border) }
+    $b.Add_Click($onClick)
+    [void]$panel.Children.Add($b)
+    return $b
+}
+
 function Short-Id([string]$id) {
     if (-not $id) { return '(none)' }
     if ($id.Length -gt 48) { return ($id.Substring(0, 45) + '...') }
@@ -215,18 +228,19 @@ function Invoke-Refresh {
         else { Add-Row $activePanel 'auth token' ('expires in ' + $tok + 'h') $green $null }
     }
 
-    foreach ($a in @($snap.Accounts)) {
+    foreach ($a in @($snap.Accounts | Where-Object { $_.SignedIn })) {
         $tag = $a.Provider
-        if ($a.Source -eq 'added') { $tag += ' (added)' }
         if ($a.LastUsed) { $tag += '  -  LAST USED' }
         $who = if ($a.Email) { $a.Email } else { '(no email on file)' }
         $rowColor = if ($a.LastUsed) { $green } else { $fg }
         Add-Row $accountPanel $tag $who $rowColor $null
         if ($a.Model) { Add-Row $accountPanel 'model' (Short-Id $a.Model) $dim $null }
-        if ($a.Note) { Add-Note $accountPanel ('note: ' + $a.Note) }
     }
-    if (@($snap.Accounts).Count -eq 0) { Add-Note $accountPanel 'No provider accounts found.' }
-    else { Add-Note $accountPanel 'Cline signs in ONE account at a time - use Add account to track the others you rotate between.' }
+    $hidden = @(@($snap.Accounts) | Where-Object { -not $_.SignedIn })
+    if ($hidden.Count -gt 0) {
+        Add-Note $accountPanel ('hidden, not signed in: ' + (($hidden | ForEach-Object { $_.Provider }) -join ', '))
+    }
+    if (@($snap.Accounts | Where-Object { $_.SignedIn }).Count -eq 0) { Add-Note $accountPanel 'No signed-in accounts found.' }
 
     $rec = $snap.Act.Recommendation
     $freeWord = 'not fresh'
@@ -241,6 +255,15 @@ function Invoke-Refresh {
             $detail = ($s.model + '  (' + $s.source + ', thinking=' + $s.thinking + ')')
             if ($s.tier -eq 'SUBSCRIPTION' -and -not $s.live) { $detail += '  [not in current pass list]' }
             Add-Row $ladderPanel ($mark + '#' + $rank) $detail (& $tierColor $s.tier) $s.tier
+            $useBtn = New-SmallButton $ladderPanel ('Use #' + $rank) {
+                $rk = [int]$this.Tag
+                $ap = Join-Path $PSScriptRoot 'CmoApply.ps1'
+                $aa = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $ap + '"'), '-Rank', $rk)
+                $r = Invoke-CmoHidden -File 'powershell.exe' -Arguments $aa
+                [System.Windows.MessageBox]::Show((($r.Output + "`n" + $r.Error).Trim()), ('Apply rank ' + $rk), 'OK', 'Information') | Out-Null
+                Invoke-Refresh
+            }
+            $useBtn.Tag = $rank
         }
     }
 
@@ -273,7 +296,7 @@ function New-Button([string]$text, [scriptblock]$onClick) {
 }
 function Show-AddAccountDialog {
     $d = New-Object System.Windows.Window
-    $d.Title = 'Add account'; $d.Width = 420; $d.Height = 250
+    $d.Title = 'Add account'; $d.Width = 420; $d.Height = 200
     $d.WindowStartupLocation = 'CenterOwner'; $d.Owner = $w
     $d.Background = (& $brush $bg)
     $sp = New-Object System.Windows.Controls.StackPanel -Property @{ Margin = '16' }
@@ -282,24 +305,77 @@ function Show-AddAccountDialog {
     $mkBox = { New-Object System.Windows.Controls.TextBox -Property @{ FontSize = 13; Padding = '6,4'; Background = (& $brush $bgBadge); Foreground = (& $brush $fg); BorderBrush = (& $brush $border) } }
     [void]$sp.Children.Add((& $mkLabel 'email'))
     $emailBox = (& $mkBox); [void]$sp.Children.Add($emailBox)
-    [void]$sp.Children.Add((& $mkLabel 'note (optional, e.g. live.com login)'))
-    $noteBox = (& $mkBox); [void]$sp.Children.Add($noteBox)
     $row = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; Margin = '0,14,0,0' }
     [void]$sp.Children.Add($row)
     $ok = New-Object System.Windows.Controls.Button -Property @{ Content = 'Save'; Padding = '18,6'; Margin = '0,0,10,0' }
     $cancel = New-Object System.Windows.Controls.Button -Property @{ Content = 'Cancel'; Padding = '18,6' }
     [void]$row.Children.Add($ok); [void]$row.Children.Add($cancel)
-    $ok.Add_Click({ $d.Tag = @{ Email = $emailBox.Text; Note = $noteBox.Text }; $d.DialogResult = $true; $d.Close() })
+    $ok.Add_Click({ $d.Tag = @{ Email = $emailBox.Text }; $d.DialogResult = $true; $d.Close() })
+    $cancel.Add_Click({ $d.DialogResult = $false; $d.Close() })
+    if ($d.ShowDialog() -eq $true) { return $d.Tag }
+    return $null
+}
+function Show-PreferredDialog {
+    # ordered preferred free-model list + ladder size. Saved to user-preferred.json
+    # in LOCALAPPDATA so reinstalls never wipe it.
+    $cur = Get-CmoRoutingConfig
+    $d = New-Object System.Windows.Window
+    $d.Title = 'Preferred models'; $d.Width = 560; $d.Height = 480
+    $d.WindowStartupLocation = 'CenterOwner'; $d.Owner = $w
+    $d.Background = (& $brush $bg)
+    $sp = New-Object System.Windows.Controls.StackPanel -Property @{ Margin = '16' }
+    $d.Content = $sp
+    $mkLabel = { param($s) New-Object System.Windows.Controls.TextBlock -Property @{ Text = $s; Foreground = (& $brush $dim); FontSize = 12; Margin = '0,8,0,4'; TextWrapping = 'Wrap' } }
+    [void]$sp.Children.Add((& $mkLabel 'preferred free models, in order (one per line):'))
+    $box = New-Object System.Windows.Controls.TextBox -Property @{
+        FontSize = 12.5; Padding = '6,4'; MinHeight = 200; MaxHeight = 240
+        Background = (& $brush $bgBadge); Foreground = (& $brush $fg); BorderBrush = (& $brush $border)
+        AcceptsReturn = $true; VerticalScrollBarVisibility = 'Auto'; TextWrapping = 'NoWrap' }
+    $box.Text = ((@($cur.freeSelection.preferredFreeModels) | Where-Object { $_ }) -join "`r`n")
+    [void]$sp.Children.Add($box)
+    $cntRow = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; Margin = '0,8,0,0' }
+    [void]$sp.Children.Add($cntRow)
+    [void]$cntRow.Children.Add((& $mkLabel 'free models on ladder: '))
+    $cntBox = New-Object System.Windows.Controls.TextBox -Property @{ Text = ([string]$cur.freeSelection.maxFreeModels); Width = 40; FontSize = 13; Padding = '4,2'; Background = (& $brush $bgBadge); Foreground = (& $brush $fg); BorderBrush = (& $brush $border) }
+    [void]$cntRow.Children.Add($cntBox)
+    $btnRow = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; Margin = '0,14,0,0' }
+    [void]$sp.Children.Add($btnRow)
+    $ok = New-Object System.Windows.Controls.Button -Property @{ Content = 'Save'; Padding = '18,6'; Margin = '0,0,10,0' }
+    $reset = New-Object System.Windows.Controls.Button -Property @{ Content = 'Reset defaults'; Padding = '18,6'; Margin = '0,0,10,0' }
+    $cancel = New-Object System.Windows.Controls.Button -Property @{ Content = 'Cancel'; Padding = '18,6' }
+    [void]$btnRow.Children.Add($ok); [void]$btnRow.Children.Add($reset); [void]$btnRow.Children.Add($cancel)
+    $ok.Add_Click({ $d.Tag = @{ Models = ($box.Text -split "`r?`n"); Count = $cntBox.Text }; $d.DialogResult = $true; $d.Close() })
+    $reset.Add_Click({ $d.Tag = @{ Reset = $true }; $d.DialogResult = $true; $d.Close() })
     $cancel.Add_Click({ $d.DialogResult = $false; $d.Close() })
     if ($d.ShowDialog() -eq $true) { return $d.Tag }
     return $null
 }
 New-Button 'Refresh' { Invoke-Refresh }
+New-Button 'Preferred models' {
+    $r = Show-PreferredDialog
+    if ($r -and $r.Reset) {
+        $fp = Get-CmoUserPreferredPath
+        if (Test-Path -LiteralPath $fp) { Remove-Item -LiteralPath $fp -Force }
+        $routing = Get-CmoRoutingConfig
+        Invoke-Refresh
+    } elseif ($r -and $r.Models) {
+        $n = 2
+        try { $n = [int]$r.Count } catch { }
+        if ($n -lt 1) { $n = 1 }; if ($n -gt 5) { $n = 5 }
+        try {
+            Set-CmoUserPreferred -PreferredFreeModels @($r.Models) -MaxFreeModels $n | Out-Null
+            $routing = Get-CmoRoutingConfig
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message, 'Preferred models', 'OK', 'Warning') | Out-Null
+        }
+        Invoke-Refresh
+    }
+}
 New-Button 'Add account' {
     $r = Show-AddAccountDialog
     if ($r -and $r.Email -and $r.Email.Trim()) {
         try {
-            Add-CmoExtraAccount -Email $r.Email.Trim() -Note ([string]$r.Note) | Out-Null
+            Add-CmoExtraAccount -Email $r.Email.Trim() | Out-Null
         } catch {
             [System.Windows.MessageBox]::Show($_.Exception.Message, 'Add account', 'OK', 'Warning') | Out-Null
         }
