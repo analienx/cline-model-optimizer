@@ -1,6 +1,10 @@
 {
   "version": 3,
   "strategy": "free-first",
+  "autoSwitch": {
+    "enabled": true,
+    "allowSubscriptionFallback": true
+  },
   "freeSelection": {
     "maxFreeModels": 3,
     "preferredFreeModels": [

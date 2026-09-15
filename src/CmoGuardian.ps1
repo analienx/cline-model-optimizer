@@ -127,6 +127,43 @@ $dynCount = @($snap.DynamicFree.Models).Count
 Write-Log ("free list: {0} models - source={1} fresh={2}{3}" -f $dynCount, $snap.DynamicFree.Source, $snap.DynamicFree.Fresh, $(if ($snap.DynamicFree.Error) { ' error=' + $snap.DynamicFree.Error } else { '' }))
 Write-Log ("ACT: provider=" + $act.Provider + " model=" + $act.Model + " tier=" + $act.Tier + " | optimal=" + $act.Recommendation.Optimal)
 Write-Log ("PLAN: provider=" + $snap.Plan.Provider + " model=" + $snap.Plan.Model + " tier=" + $snap.Plan.Tier)
+# ---- auto-switch: the original idea, adapted (see Get-CmoAutoSwitchPlan) ----
+# When the live model is capped (inferred) or a free model is unused while a
+# subscription burns, plan the next model. VS Code CLOSED -> apply it via
+# CmoApply (the extension would overwrite our write while it runs). VS Code
+# OPEN -> advise via toast, never fight the running extension.
+try {
+    $plan = Get-CmoAutoSwitchPlan -Routing $routing -Act $act -UsageState $u
+    if ($plan) {
+        $vsOpen = @(Get-Process -Name 'Code' -ErrorAction SilentlyContinue).Count -gt 0
+        if ($vsOpen) {
+            Write-Log ("auto-switch plan: " + $plan.From + " -> " + $plan.To + " (rank " + $plan.Rank + ", " + $plan.Reason + ") - VS Code running, advising only")
+            $msg = switch ([string]$plan.Reason) {
+                'cap'              { ($plan.From + " free tier is used up - " + $plan.To + " is still free. Close VS Code to let me switch, or pick it on the dashboard") }
+                'all-free-capped'  { ("all free models are used up today - " + $plan.To + " (subscription) is the fallback. Close VS Code to let me switch") }
+                default            { ("subscription model in use - " + $plan.To + " is still free. Close VS Code to let me switch, or pick it on the dashboard") }
+            }
+            if (Invoke-CmoToast -Key 'AutoSwitch' -RateLimitHours 1 -Title 'Cline Model Optimizer' -Message $msg) {
+                Write-Log 'toast: switch advised'
+            }
+        } else {
+            $aa = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $PSScriptRoot 'CmoApply.ps1') + '"'),
+                '-Rank', [string]$plan.Rank)
+            $r = Invoke-CmoHidden -File 'powershell.exe' -Arguments $aa
+            $out = (($r.Output + ' ' + $r.Error).Trim())
+            if ($r.ExitCode -eq 0) {
+                Write-Log ("AUTO-SWITCHED " + $plan.From + " -> " + $plan.To + " (rank " + $plan.Rank + ", " + $plan.Reason + ")")
+                Invoke-CmoToast -Key 'AutoSwitch' -RateLimitHours 1 -Title 'Cline Model Optimizer' `
+                    -Message ("Auto-switched to " + $plan.To + " (" + $plan.Reason + ")") | Out-Null
+            } elseif ($r.ExitCode -eq 1) {
+                Write-Log 'auto-switch skipped: VS Code started meanwhile'
+            } else {
+                Write-Log ("auto-switch apply failed (exit " + $r.ExitCode + "): " + $out)
+            }
+        }
+    }
+} catch { Write-Log ('auto-switch error: ' + $_.Exception.Message) }
+
 
 $status = 'OK-FREE-OPTIMAL'
 $exit = 0

@@ -634,3 +634,64 @@ function Get-CmoSnapshot {
     }
     return $snap
 }
+
+
+function Get-CmoAutoSwitchPlan {
+    # The original idea, adapted to what is technically possible: Cline holds ONE
+    # login at a time (other accounts have no tokens on disk - obtained via
+    # per-account browser OAuth), so ACCOUNT switching cannot be automated.
+    # MODEL switching within the signed-in account can: when the live free model
+    # is capped, plan the next GREEN free model on the ladder; when every free
+    # model is capped, optionally fall back to subscription (never paid).
+    param([object]$Routing, [object]$Act, [object]$UsageState)
+    if (-not $Act) { return $null }
+    $enabled = $true; $allowSub = $true
+    try {
+        if ($Routing.autoSwitch) {
+            if ($Routing.autoSwitch.enabled -eq $false) { $enabled = $false }
+            if ($Routing.autoSwitch.allowSubscriptionFallback -eq $false) { $allowSub = $false }
+        }
+    } catch { }
+    if (-not $enabled) { return $null }
+
+    $caps = Get-CmoInferredCaps -State $UsageState
+    $eff = Get-CmoEffectiveStrategy -Routing $Routing -Mode 'act'
+    $steps = @($eff.Steps)
+    if ($steps.Count -eq 0) { return $null }
+    $curCore = Get-CmoModelCoreId -Id ([string]$Act.Model)
+    $curTier = [string]$Act.Tier
+
+    # first GREEN free step (FREE tier, not capped). If the current model is
+    # that step, the user is already in the best possible place - no plan.
+    $freeRank = 0; $freeModel = ''
+    for ($i = 0; $i -lt $steps.Count; $i++) {
+        $s = $steps[$i]
+        if ([string]$s.tier -ne 'FREE') { continue }
+        $core = Get-CmoModelCoreId -Id ([string]$s.model)
+        if ($caps.Contains($core)) { continue }
+        if ($core -eq $curCore) { return $null }   # current free model is green
+        if ($freeRank -eq 0) { $freeRank = $i + 1; $freeModel = [string]$s.model }
+    }
+
+    $curCapped = $caps.Contains($curCore)
+    if ($curTier -eq 'FREE' -and $curCapped) {
+        if ($freeRank -gt 0) {
+            return @{ From = [string]$Act.Model; To = $freeModel; Rank = $freeRank; Reason = 'cap' }
+        }
+        # every free model is capped today -> optional subscription fallback
+        if ($allowSub) {
+            for ($i = 0; $i -lt $steps.Count; $i++) {
+                $s = $steps[$i]
+                if ([string]$s.tier -eq 'SUBSCRIPTION') {
+                    return @{ From = [string]$Act.Model; To = [string]$s.model; Rank = ($i + 1); Reason = 'all-free-capped' }
+                }
+            }
+        }
+        return $null
+    }
+    # subscription/paid in use while a green free model exists -> back to free
+    if ($curTier -ne 'FREE' -and $freeRank -gt 0) {
+        return @{ From = [string]$Act.Model; To = $freeModel; Rank = $freeRank; Reason = 'free-available' }
+    }
+    return $null
+}

@@ -590,6 +590,11 @@ function Render-System([object]$snap) {
     $lines += ('cline-pass models: ' + @($dyn.ClinePass).Count)
     if ($dyn.Error) { $lines += ('last fetch error: ' + [string]$dyn.Error) }
     $lines += (Get-CmoUsageSummaryLine)
+    # pending automatic switch (applies itself the moment VS Code closes)
+    $swPlan = Get-CmoAutoSwitchPlan -Routing $script:routing -Act $snap.Act -UsageState (Get-CmoUsageState)
+    if ($swPlan) {
+        $lines += ('auto-switch wanted: ' + $swPlan.From + ' -> ' + $swPlan.To + ' (' + $swPlan.Reason + '; applies when VS Code closes)')
+    }
     foreach ($l in $lines) { [void]$systemCard.Body.Children.Add((New-Text $l 11 $dim)) }
 
     $log = ''
