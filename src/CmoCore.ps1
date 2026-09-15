@@ -23,17 +23,21 @@ function Get-CmoModelTier {
     if (-not $Model) { return 'UNKNOWN' }
     $m = $Model.ToLowerInvariant()
 
-    if ($m -like 'cline-pass/*' -or $Provider -eq 'cline-pass') { return 'SUBSCRIPTION' }
-    foreach ($p in $Routing.tierRules.freePrefixes) { if ($m -like ($p.ToLowerInvariant() + '*')) { return 'FREE' } }
-    foreach ($s in $Routing.tierRules.freeSuffixes) { if ($m -like ('*' + $s.ToLowerInvariant())) { return 'FREE' } }
-    foreach ($f in $Routing.tierRules.freeModels)  { if ($m -eq $f.ToLowerInvariant()) { return 'FREE' } }
-
-    # dynamic: our own cached free list (fetched from Cline's public API)
+    # Dynamic free list FIRST: it is the live authority on what Cline currently
+    # offers for free. 'cline-free/muse-spark-...' is a real free model even when
+    # it arrives via the cline-pass provider slot, so the live list outranks the
+    # static provider-prefix rule below.
     $c = Read-CmoFreeListCache -Path (Get-CmoFreeListCachePath)
     if ($c) {
         foreach ($id in $c.Free)      { if ($id -and $id.ToLowerInvariant() -eq $m) { return 'FREE' } }
         foreach ($id in $c.ClinePass) { if ($id -and $id.ToLowerInvariant() -eq $m) { return 'SUBSCRIPTION' } }
     }
+
+    foreach ($p in $Routing.tierRules.freePrefixes) { if ($m -like ($p.ToLowerInvariant() + '*')) { return 'FREE' } }
+    foreach ($s in $Routing.tierRules.freeSuffixes) { if ($m -like ('*' + $s.ToLowerInvariant())) { return 'FREE' } }
+    foreach ($f in $Routing.tierRules.freeModels)  { if ($m -eq $f.ToLowerInvariant()) { return 'FREE' } }
+
+    if ($m -like 'cline-pass/*' -or $Provider -eq 'cline-pass') { return 'SUBSCRIPTION' }
 
     # dynamic: Cline's own cache of free models (older extension versions)
     $cache = Join-Path (Get-CmoDataDir) 'cache\cline_recommended_models.json'
@@ -95,14 +99,49 @@ function Get-CmoAccounts {
             LastUsed  = ($p.lastUsedProvider -eq $prop.Name)
         }
     }
-    return $out
+    # stable order: cline, cline-pass, then everything else alphabetically
+    $order = @{ 'cline' = 0; 'cline-pass' = 1 }
+    return @($out | Sort-Object { if ($order.ContainsKey($_.Provider)) { $order[$_.Provider] } else { 9 } }, Provider)
 }
 
 function Get-CmoTokenRemainingHours {
     param([object]$Accounts)
-    $c = $Accounts | Where-Object { $_.Provider -eq 'cline' } | Select-Object -First 1
-    if (-not $c -or -not $c.ExpiresAtMs) { return $null }
-    return [math]::Round((($c.ExpiresAtMs / 1000) - [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) / 3600.0, 1)
+    # longest-lived token across all authenticated providers (cline / cline-pass)
+    $best = $null
+    foreach ($a in @($Accounts)) {
+        if (-not $a -or -not $a.ExpiresAtMs) { continue }
+        try {
+            $h = [math]::Round((($a.ExpiresAtMs / 1000) - [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) / 3600.0, 1)
+            if ($null -eq $best -or $h -gt $best) { $best = $h }
+        } catch { }
+    }
+    return $best
+}
+
+# ---- hidden child process launcher ----
+# Child powershell.exe invocations MUST NOT flash a console (conhost) window.
+# The '&' operator inherits the caller's window style, which is unreliable when
+# launched from Task Scheduler or from a windowless parent - so child processes
+# are started explicitly headless here. Returns ExitCode/Output/Error.
+function Invoke-CmoHidden {
+    param([string]$File, [string[]]$Arguments = @())
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $File
+        $psi.Arguments = ($Arguments -join ' ')
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $out = $p.StandardOutput.ReadToEnd()
+        $err = $p.StandardError.ReadToEnd()
+        $p.WaitForExit(120000) | Out-Null
+        return [pscustomobject]@{ ExitCode = $p.ExitCode; Output = $out; Error = $err }
+    } catch {
+        return [pscustomobject]@{ ExitCode = -1; Output = ''; Error = $_.Exception.Message }
+    }
 }
 
 # ---- session history (from per-session JSON files) ----

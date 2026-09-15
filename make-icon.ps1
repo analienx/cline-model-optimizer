@@ -1,13 +1,14 @@
-# Generates src/cmo-icon.ico - dark rounded square, ">" prompt, mauve accent, green dot.
-# Same generator design as the RDC icon, different palette.
+# Icon branding: teal gauge-dial ring (4 ticks; filled arc shows free-slot usage)
+# + '$' free symbol + status dot. Distinct from RDC's amber chevron icon.
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
 $out = Join-Path $PSScriptRoot 'src\cmo-icon.ico'
 
-$card   = [System.Drawing.Color]::FromArgb(255, 40, 40, 56)     # #282838
-$accent = [System.Drawing.Color]::FromArgb(255, 203, 166, 247)  # #CBA6F7 (mauve)
-$green  = [System.Drawing.Color]::FromArgb(255, 166, 227, 161)  # #A6E3A1
+$card   = [System.Drawing.Color]::FromArgb(255, 26, 31, 46)       # #1A1F2E background
+$teal   = [System.Drawing.Color]::FromArgb(255, 94, 234, 212)      # #5EEAD4 ring + symbol
+$ringDim= [System.Drawing.Color]::FromArgb(255, 55, 65, 81)        # #374151 track
+$green  = [System.Drawing.Color]::FromArgb(255, 74, 222, 128)      # #4ADE80 status dot
 
 $pngs = @{}
 foreach ($size in 16, 24, 32, 48, 64, 128, 256) {
@@ -30,33 +31,52 @@ foreach ($size in 16, 24, 32, 48, 64, 128, 256) {
 
     if ($size -ge 24) {
         $penW = [Math]::Max(1, [int]($size * 0.04))
-        $pen = New-Object System.Drawing.Pen $accent, $penW
+        $pen = New-Object System.Drawing.Pen $teal, $penW
         $g.DrawPath($pen, $path)
         $pen.Dispose()
     }
 
-    $fontPx = [Math]::Max(6, [int]($size * 0.62))
+    $cx = $size / 2.0; $cy = $size / 2.0
+    $ringR = $size * 0.30
+    if ($size -ge 24) {
+        $trackW = [Math]::Max(2, [int]($size * 0.075))
+        $trackPen = New-Object System.Drawing.Pen $ringDim, $trackW
+        $g.DrawEllipse($trackPen, ($cx - $ringR), ($cy - $ringR), (2 * $ringR), (2 * $ringR))
+        $trackPen.Dispose()
+        # filled arc: bottom gap (gauge opening) from 40deg to 140deg
+        $fillPen = New-Object System.Drawing.Pen $teal, $trackW
+        $fillPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+        $fillPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+        $g.DrawArc($fillPen, ($cx - $ringR), ($cy - $ringR), (2 * $ringR), (2 * $ringR), 140, 260)
+        $fillPen.Dispose()
+        # 4 tick marks on the filled arc (top-left, top, top-right, right)
+        foreach ($deg in 150, 200, 250, 300) {
+            $rad = $deg * [Math]::PI / 180.0
+            $ox = $cx + [Math]::Cos($rad) * $ringR
+            $oy = $cy + [Math]::Sin($rad) * $ringR
+            $ix = $cx + [Math]::Cos($rad) * ($ringR - $trackW * 1.1)
+            $iy = $cy + [Math]::Sin($rad) * ($ringR - $trackW * 1.1)
+            $tickPen = New-Object System.Drawing.Pen $card, ([Math]::Max(1, [int]($size * 0.018)))
+            $g.DrawLine($tickPen, $ox, $oy, $ix, $iy)
+            $tickPen.Dispose()
+        }
+    }
+
+    # '$' free symbol centered inside the dial
+    $fontPx = [Math]::Max(6, [int]($size * 0.42))
     $font = New-Object System.Drawing.Font ('Segoe UI'), $fontPx, ([System.Drawing.FontStyle]::Bold), ([System.Drawing.GraphicsUnit]::Pixel)
-    $fgBrush = New-Object System.Drawing.SolidBrush $accent
+    $fgBrush = New-Object System.Drawing.SolidBrush $teal
     $sf = New-Object System.Drawing.StringFormat
     $sf.Alignment = 'Center'; $sf.LineAlignment = 'Center'
     $textRect = New-Object System.Drawing.RectangleF 0, (-($size * 0.04)), $size, $size
-    $g.DrawString('>', $font, $fgBrush, $textRect, $sf)
+    $g.DrawString('$', $font, $fgBrush, $textRect, $sf)
 
-    if ($size -ge 32) {
-        $dotR = [Math]::Max(2, [int]($size * 0.09))
-        $dotBrush = New-Object System.Drawing.SolidBrush $green
-        $dotRect = New-Object System.Drawing.Rectangle ($rect.Right - 3*$dotR), ($rect.Bottom - 3*$dotR), (2*$dotR), (2*$dotR)
-        $g.FillEllipse($dotBrush, $dotRect)
-        $dotBrush.Dispose()
-    }
-
-    if ($size -ge 48) {
-        $stripBrush = New-Object System.Drawing.SolidBrush $green
-        $stripH = [Math]::Max(2, [int]($size * 0.06))
-        $g.FillRectangle($stripBrush, 0, ($rect.Bottom - 2*$stripH), $size, $stripH)
-        $stripBrush.Dispose()
-    }
+    # status dot bottom-right
+    $dotR = [Math]::Max(2, [int]($size * 0.10))
+    $dotBrush = New-Object System.Drawing.SolidBrush $green
+    $dotRect = New-Object System.Drawing.Rectangle ($rect.Right - 3*$dotR), ($rect.Bottom - 3*$dotR), (2*$dotR), (2*$dotR)
+    $g.FillEllipse($dotBrush, $dotRect)
+    $dotBrush.Dispose()
 
     $font.Dispose(); $fgBrush.Dispose(); $bgBrush.Dispose(); $path.Dispose(); $g.Dispose()
 

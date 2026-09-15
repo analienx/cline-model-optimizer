@@ -34,7 +34,10 @@ function Invoke-CmoToast {
     $stampKey = 'LastToast' + $Key
     $last = $state[$stampKey]
     if ($last -and (((Get-Date) - [datetime]$last).TotalHours -lt $RateLimitHours)) { return $false }
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $notify -Title $Title -Message $Message | Out-Null
+    # headless child: must never flash a console window (see Invoke-CmoHidden)
+    Invoke-CmoHidden -File 'powershell.exe' -Arguments @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $notify + '"'),
+        '-Title', ('"' + $Title + '"'), '-Message', ('"' + $Message + '"')) | Out-Null
     $state[$stampKey] = (Get-Date).ToString('o')
     return $true
 }
