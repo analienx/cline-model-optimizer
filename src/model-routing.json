@@ -1,9 +1,13 @@
 {
   "version": 3,
   "strategy": "free-first",
+  "routingOwner": "cline-model-optimizer",
+  "canonicalPolicy": "foundry-route-policy.json",
+  "paygAllowed": false,
   "autoSwitch": {
     "enabled": true,
-    "allowSubscriptionFallback": true
+    "allowSubscriptionFallback": true,
+    "allowPaidFallback": false
   },
   "freeSelection": {
     "maxFreeModels": 3,
@@ -15,7 +19,7 @@
     "fillFromDynamic": true,
     "subscriptionSteps": [
       { "provider": "cline-pass", "model": "cline-pass/glm-5.3-flash", "thinking": "off" },
-      { "provider": "cline-pass", "model": "cline-pass/deepseek-v4-flash", "thinking": "off" }
+      { "provider": "cline-pass", "model": "cline-pass/deepseek-v4.1-flash", "thinking": "off" }
     ]
   },
   "dynamic": {
@@ -36,14 +40,14 @@
         { "provider": "cline", "model": "z-ai/glm-5.3-flash", "thinking": "high" },
         { "provider": "cline", "model": "cline-free/deepseek-v4.1-flash", "thinking": "off" },
         { "provider": "cline-pass", "model": "cline-pass/glm-5.3-flash", "thinking": "off" },
-        { "provider": "cline-pass", "model": "cline-pass/deepseek-v4-flash", "thinking": "off" }
+        { "provider": "cline-pass", "model": "cline-pass/deepseek-v4.1-flash", "thinking": "off" }
       ],
       "act": [
         { "provider": "cline", "model": "cline-free/muse-spark-1.3-contributor", "thinking": "off" },
         { "provider": "cline", "model": "z-ai/glm-5.3-flash", "thinking": "high" },
         { "provider": "cline", "model": "cline-free/deepseek-v4.1-flash", "thinking": "off" },
         { "provider": "cline-pass", "model": "cline-pass/glm-5.3-flash", "thinking": "off" },
-        { "provider": "cline-pass", "model": "cline-pass/deepseek-v4-flash", "thinking": "off" }
+        { "provider": "cline-pass", "model": "cline-pass/deepseek-v4.1-flash", "thinking": "off" }
       ]
     }
   },
@@ -54,7 +58,7 @@
       "cline-free/muse-spark-1.3-contributor",
       "z-ai/glm-5.3-flash",
       "cline-free/deepseek-v4.1-flash",
-      "deepseek/deepseek-v4-flash",
+      "deepseek/deepseek-v4.1-flash",
       "kwaipilot/kat-coder-pro",
       "arcee-ai/trinity-large-preview:free"
     ],

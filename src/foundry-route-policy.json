@@ -1,0 +1,101 @@
+{
+  "schema": "foundry-route-policy/v1",
+  "policyVersion": "1.0.0",
+  "owner": "cline-model-optimizer",
+  "description": "Canonical free-first routing policy owned solely by cline-model-optimizer for Agent Foundry v3. Pi launchers pin policyVersion (and optionally sha256) or validate live config against this file before routing.",
+  "piAccounts": ["pi-1", "pi-2", "pi-3"],
+  "orderRule": "model-major: each free model runs across Pi accounts 1,2,3 in order before advancing to the next free model. Subscription tail runs only after all 9 free legs are exhausted.",
+  "freeRoute": [
+    {
+      "rank": 1,
+      "model": "cline-free/muse-spark-1.3-contributor",
+      "provider": "cline",
+      "tier": "FREE",
+      "aliases": ["muse-spark-1.3"],
+      "piAccounts": ["pi-1", "pi-2", "pi-3"]
+    },
+    {
+      "rank": 2,
+      "model": "z-ai/glm-5.3-flash",
+      "provider": "cline",
+      "tier": "FREE",
+      "aliases": [],
+      "piAccounts": ["pi-1", "pi-2", "pi-3"]
+    },
+    {
+      "rank": 3,
+      "model": "cline-free/deepseek-v4.1-flash",
+      "provider": "cline",
+      "tier": "FREE",
+      "aliases": ["deepseek/deepseek-v4.1-flash"],
+      "piAccounts": ["pi-1", "pi-2", "pi-3"]
+    }
+  ],
+  "routeQueue": [
+    { "seq": 1, "model": "cline-free/muse-spark-1.3-contributor", "piAccount": "pi-1", "tier": "FREE", "legKind": "free" },
+    { "seq": 2, "model": "cline-free/muse-spark-1.3-contributor", "piAccount": "pi-2", "tier": "FREE", "legKind": "free" },
+    { "seq": 3, "model": "cline-free/muse-spark-1.3-contributor", "piAccount": "pi-3", "tier": "FREE", "legKind": "free" },
+    { "seq": 4, "model": "z-ai/glm-5.3-flash", "piAccount": "pi-1", "tier": "FREE", "legKind": "free" },
+    { "seq": 5, "model": "z-ai/glm-5.3-flash", "piAccount": "pi-2", "tier": "FREE", "legKind": "free" },
+    { "seq": 6, "model": "z-ai/glm-5.3-flash", "piAccount": "pi-3", "tier": "FREE", "legKind": "free" },
+    { "seq": 7, "model": "cline-free/deepseek-v4.1-flash", "piAccount": "pi-1", "tier": "FREE", "legKind": "free" },
+    { "seq": 8, "model": "cline-free/deepseek-v4.1-flash", "piAccount": "pi-2", "tier": "FREE", "legKind": "free" },
+    { "seq": 9, "model": "cline-free/deepseek-v4.1-flash", "piAccount": "pi-3", "tier": "FREE", "legKind": "free" },
+    { "seq": 10, "model": "cline-pass/glm-5.3-flash", "piAccount": null, "tier": "SUBSCRIPTION", "legKind": "subscription" },
+    { "seq": 11, "model": "cline-pass/deepseek-v4.1-flash", "piAccount": null, "tier": "SUBSCRIPTION", "legKind": "subscription" }
+  ],
+  "subscriptionFallback": [
+    { "provider": "cline-pass", "model": "cline-pass/glm-5.3-flash", "thinking": "off" },
+    { "provider": "cline-pass", "model": "cline-pass/deepseek-v4.1-flash", "thinking": "off" }
+  ],
+  "neverPayg": true,
+  "allowedTiers": ["FREE", "SUBSCRIPTION"],
+  "staleAliasesCorrected": [
+    {
+      "stale": "deepseek/deepseek-v4-flash",
+      "canonical": "cline-free/deepseek-v4.1-flash",
+      "note": "Missing minor version (.1). Core-id matching still resolves the old string, but policy and tier lists use v4.1."
+    },
+    {
+      "stale": "cline-pass/deepseek-v4-flash",
+      "canonical": "cline-pass/deepseek-v4.1-flash",
+      "note": "Subscription tail was pinned to the v4 id; corrected to v4.1 to match the free canonical."
+    },
+    {
+      "stale": "cline-free/glm-5.3-flash (assumed prefix rewrite)",
+      "canonical": "z-ai/glm-5.3-flash",
+      "note": "GLM Flash free id rides the cline provider with the z-ai/ prefix. Do NOT rewrite it to cline-free/."
+    },
+    {
+      "stale": "muse-spark-1.3 (bare short name)",
+      "canonical": "cline-free/muse-spark-1.3-contributor",
+      "note": "Short display name; canonical config id keeps the -contributor suffix."
+    }
+  ],
+  "failureTaxonomy": {
+    "quota": {
+      "meaning": "Free/subscription budget for this leg is exhausted today. Advance the route queue (next account, then next model).",
+      "signals": ["INFERENCE_CAP_ERROR", "inference cap", "status code 429", "quota exceeded", "resource exhausted", "cline_free_promotion_ended"]
+    },
+    "auth": {
+      "meaning": "Credential invalid, expired, or missing. Do NOT advance the queue as if budget were spent; surface re-sign-in. Cline exposes only the active login, so other accounts stay 'unknown' until signed in.",
+      "signals": ["401", "403", "unauthorized", "forbidden", "token expired", "re-sign in", "invalid_token", "auth expired"]
+    },
+    "transient": {
+      "meaning": "Network or server hiccup. Retry the same leg with backoff; do NOT advance the queue.",
+      "signals": ["timeout", "timed out", "connection", "reset by peer", "502", "503", "504", "temporarily unavailable", "fetch failed", "unreachable"]
+    }
+  },
+  "capability": {
+    "pi": "Pi launchers MAY rotate isolated account profiles (pi-1/pi-2/pi-3) per this queue; each profile carries its own credentials and budget.",
+    "cline": "The Cline VS Code extension exposes only the ACTIVE login on disk. This tool never claims automatic switching of unavailable Cline credentials: legs for other Cline logins are advisory ('sign in to unlock') until that login has authenticated on this machine with VS Code closed."
+  },
+  "ownership": {
+    "router": "cline-model-optimizer (sole routing-policy owner for Agent Foundry v3)",
+    "consumers": ["Agent Foundry v3 launchers (pin or validate this policy)", "interop gateway (forwards route decisions, never reorders them)"],
+    "nonOwners": "Foundry and the interop gateway MUST NOT define competing model/account orders; they consume this policy."
+  },
+  "pinning": {
+    "howTo": "Pin policyVersion + sha256 of this file in launcher config; at startup call Test-CmoFoundryRoutePolicy to validate a local copy, and Get-CmoFoundryRouteQueue to enumerate legs. Reject any config with paid legs or a different free order."
+  }
+}

@@ -12,7 +12,7 @@ This tool watches Cline's own data store and gives you:
 
 - **Dynamic free-first strategy** - reads Cline's live free-model catalog each cycle and
   picks your preferred free models automatically (top 1, 2, 3... - configurable), then
-  subscription, then paid, as explicit fallbacks
+  Cline Pass subscription as the only explicit fallback - never pay-as-you-go
 - **Full visibility** - which model is active in Plan/Act mode, its tier
   (FREE / SUBSCRIPTION / PAID), which account, reasoning effort, auth-token expiry
 - **Usage accounting** - minutes spent per tier per day, per-session model/cost history
@@ -57,8 +57,9 @@ first check.
 "freeSelection": {
   "maxFreeModels": 2,
   "preferredFreeModels": [
+    "cline-free/muse-spark-1.3-contributor",
     "z-ai/glm-5.3-flash",
-    "deepseek/deepseek-v4-flash"
+    "cline-free/deepseek-v4.1-flash"
   ],
   "dynamicSource": "cline-cache",
   "fillFromDynamic": true,
@@ -81,6 +82,27 @@ Change `maxFreeModels` to 1/2/3 to decide how many free models participate befor
 subscription tier kicks in. Reorder `preferredFreeModels` to rank them. The dashboard
 shows the resolved ladder live, including each step's source.
 
+## Canonical routing (Agent Foundry v3)
+
+This repo is the **sole routing-policy owner** for Agent Foundry v3
+([issue #1](https://github.com/analienx/cline-model-optimizer/issues/1),
+see [`docs/ROUTING-OWNERSHIP.md`](docs/ROUTING-OWNERSHIP.md)).
+
+Canonical free order (model-major across Pi accounts 1,2,3):
+**Muse Spark 1.3 free** (`cline-free/muse-spark-1.3-contributor`) x pi-1,2,3,
+then **GLM-5.3 Flash free** (`z-ai/glm-5.3-flash`) x pi-1,2,3,
+then **DeepSeek V4.1 Flash free** (`cline-free/deepseek-v4.1-flash`) x pi-1,2,3,
+then **Cline Pass subscription only** - never pay-as-you-go.
+
+Machine-readable policy: [`src/foundry-route-policy.json`](src/foundry-route-policy.json)
+(pin `policyVersion`, validate with `Test-CmoFoundryRoutePolicy` in
+[`src/CmoFoundryRoute.ps1`](src/CmoFoundryRoute.ps1)).
+
+Capability precision: **Pi launchers may rotate isolated account profiles**
+(pi-1/pi-2/pi-3), while **the Cline VS Code extension exposes only the active
+login** - this tool never claims automatic switching of unavailable Cline
+credentials (other Cline logins are advisory until signed in).
+
 ## Daily use
 
 | Want to... | Do this |
@@ -100,7 +122,7 @@ shows the resolved ladder live, including each step's source.
 - **Secrets are never touched**: `secrets.json` and auth tokens are never read, logged,
   or displayed - only account email/id and token *expiry* are surfaced
 - Toasts are rate-limited (2 h paid-in-use, 6 h auth) - no nagging
-- Exit codes: `0` optimal-free · `1` free-but-suboptimal · `2` paid/subscription-in-use ·
+- Exit codes: `0` optimal-free · `1` free-but-suboptimal · `2` subscription/paid-observed (never routed to) ·
   `3` auth-warning · `4` no Cline state
 
 ## Dashboard
