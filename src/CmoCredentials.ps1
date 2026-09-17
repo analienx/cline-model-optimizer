@@ -168,12 +168,22 @@ function Invoke-CmoRefreshCapturedCredential {
 
 function Update-CmoCapturedCredentialTokens {
     # Refresh every due saved login. OAuth refresh tokens rotate, so each result
-    # is persisted immediately before the next account is attempted.
-    param([int]$RefreshBeforeMinutes = 15)
+    # is persisted immediately before the next account is attempted. A login that
+    # Cline currently owns while VS Code is running must be excluded: refreshing
+    # it here would rotate the refresh token underneath Cline's in-memory session.
+    param(
+        [int]$RefreshBeforeMinutes = 15,
+        [string[]]$ExcludeEmail = @()
+    )
     $results = @()
     foreach ($c in @(Get-CmoCapturedAccounts)) {
         if (-not $c.Email) { continue }
-        $results += Invoke-CmoRefreshCapturedCredential -Email ([string]$c.Email) `
+        $email = [string]$c.Email
+        if (@($ExcludeEmail) -contains $email) {
+            $results += [pscustomobject]@{ Email = $email; Refreshed = $false; Reason = 'active-owned-by-cline' }
+            continue
+        }
+        $results += Invoke-CmoRefreshCapturedCredential -Email $email `
             -RefreshBeforeMinutes $RefreshBeforeMinutes
     }
     return @($results)

@@ -263,6 +263,36 @@ function Stop-CmoUnlockWatch {
     if ($script:unlockTimer) { try { $script:unlockTimer.Stop() } catch { }; $script:unlockTimer = $null }
 }
 
+function Start-CmoManualCredentialRenewal([string]$Email) {
+    if (-not $Email) { return }
+    $activeOwnedByCline = $false
+    try {
+        $a = Get-CmoProvidersAuth
+        $activeEmail = [string]$a.metadata.userInfo.email
+        $codeOpen = @(Get-Process -Name 'Code' -ErrorAction SilentlyContinue).Count -gt 0
+        $activeOwnedByCline = ($codeOpen -and $activeEmail -and $activeEmail.Equals($Email, [System.StringComparison]::OrdinalIgnoreCase))
+    } catch { }
+
+    $renewal = $null
+    if (-not $activeOwnedByCline) {
+        try { $renewal = Invoke-CmoRefreshCapturedCredential -Email $Email -Force } catch { }
+        if ($renewal -and $renewal.Refreshed) {
+            try { Sync-CmoActiveClineCredential -Email $Email | Out-Null } catch { }
+            Invoke-Refresh
+            return
+        }
+        if ($renewal -and [string]$renewal.Reason -eq 'refresh-request-failed') {
+            [System.Windows.MessageBox]::Show('Automatic renewal could not reach Cline. Check the connection and click Renew login again. Manual sign-in is only needed if the saved refresh token is rejected.', 'Renew Cline login', 'OK', 'Warning') | Out-Null
+            return
+        }
+    }
+
+    try { Set-Clipboard -Value $Email } catch { }
+    try { Open-Cline } catch { }
+    if ($script:unlockStrip) { Start-CmoUnlock -Email $Email }
+    [System.Windows.MessageBox]::Show(('Automatic renewal is not available for ' + $Email + '. The email is on your clipboard. In Cline, sign out and sign in with that account once; the optimizer will capture the new login automatically.'), 'Manual Cline renewal', 'OK', 'Information') | Out-Null
+}
+
 function Start-CmoUnlock([string]$Email) {
     if (-not $Email) { return }
     $sp = $script:unlockStrip
@@ -580,11 +610,13 @@ function New-AccountRow([object]$r) {
     [void]$nameStack.Children.Add($emailT)
     $savedAuth = @()
     try { $savedAuth = @(Get-CmoCapturedAccounts | Where-Object { ([string]$_.Email) -eq ([string]$r.Email) } | Select-Object -First 1) } catch { }
+    $authExpired = ($savedAuth.Count -gt 0 -and [bool]$savedAuth[0].Expired)
     if ($r.Sources -contains 'cline-file') {
         [void]$nameStack.Children.Add((New-Pill 'ACTIVE LOGIN' $teal))
+        if ($authExpired) { [void]$nameStack.Children.Add((New-Pill 'TOKEN EXPIRED' $amber)) }
     } elseif ($savedAuth.Count -gt 0 -and -not $savedAuth[0].Expired) {
         [void]$nameStack.Children.Add((New-Pill 'AUTH READY' $green))
-    } elseif ($savedAuth.Count -gt 0 -and $savedAuth[0].Expired) {
+    } elseif ($authExpired) {
         [void]$nameStack.Children.Add((New-Pill 'TOKEN EXPIRED' $amber))
     } else {
         [void]$nameStack.Children.Add((New-Pill 'NOT AUTHENTICATED' $dim))
@@ -605,6 +637,11 @@ function New-AccountRow([object]$r) {
 
     $cell = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; HorizontalAlignment = 'Right'; VerticalAlignment = 'Center' }
     $email = [string]$r.Email
+    if ($authExpired) {
+        $bRenew = New-TinyButton 'renew login' ({ Start-CmoManualCredentialRenewal -Email $email }).GetNewClosure() $amber
+        $bRenew.ToolTip = 'retry secure OAuth renewal; if the saved refresh token cannot be used, guide one manual Cline sign-in'
+        [void]$cell.Children.Add($bRenew)
+    }
     $bBudget = New-TinyButton ('budget ' + [int]$r.BudgetMin + 'm') ({ Show-CmoBudgetEditor -Email $email }).GetNewClosure() $teal
     $bBudget.ToolTip = ('daily free budget for ' + $email)
     [void]$cell.Children.Add($bBudget)

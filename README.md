@@ -105,6 +105,7 @@ shows the resolved ladder live, including each step's source.
   encrypted copy under `%LOCALAPPDATA%\ClineModelOptimizer`; access/refresh tokens and
   auth metadata are protected with Windows DPAPI (`CurrentUser`), never committed,
   logged, or displayed, and passwords are never requested or stored
+- Saved rotation logins renew automatically before expiry. The optimizer never rotates the active refresh token underneath a running Cline session. If automatic renewal cannot be completed, the expired account shows **renew login**; that retries secure refresh first and falls back to one guided Cline OAuth sign-in when required.
 - `secrets.json` is never read or modified
 - Toasts are rate-limited (2 h paid-in-use, 6 h auth) - no nagging
 - Exit codes: `0` optimal-free · `1` free-but-suboptimal · `2` paid/subscription-in-use ·

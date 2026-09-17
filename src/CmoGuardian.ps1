@@ -139,13 +139,19 @@ try {
     # Cline refreshes its active login while it is running, but saved rotation
     # logins are never loaded by Cline and would otherwise expire silently.
     # Renew them before planning; values stay DPAPI-protected and are never logged.
-    $renewals = @(Update-CmoCapturedCredentialTokens -RefreshBeforeMinutes 15)
+    # Never rotate the active refresh token underneath a running Cline session.
+    $liveCline = @($snap.Accounts | Where-Object { $_.Provider -eq 'cline' -and $_.Email } | Select-Object -First 1)
+    $excludeRenewal = @()
+    $vsOpenForRenewal = @(Get-Process -Name 'Code' -ErrorAction SilentlyContinue).Count -gt 0
+    if ($vsOpenForRenewal -and $liveCline.Count -gt 0) {
+        $excludeRenewal = @([string]$liveCline[0].Email)
+    }
+    $renewals = @(Update-CmoCapturedCredentialTokens -RefreshBeforeMinutes 15 -ExcludeEmail $excludeRenewal)
     foreach ($renewal in @($renewals | Where-Object { $_.Refreshed })) {
         Write-Log 'renewed saved Cline OAuth login'
     }
     # When VS Code is closed, also propagate the active saved login back to
     # providers.json so Cline starts with the renewed, rotated token.
-    $liveCline = @($snap.Accounts | Where-Object { $_.Provider -eq 'cline' -and $_.Email } | Select-Object -First 1)
     if ($liveCline.Count -gt 0) {
         if (Sync-CmoActiveClineCredential -Email ([string]$liveCline[0].Email)) {
             Write-Log 'active Cline OAuth credential synchronized'
@@ -229,7 +235,9 @@ if ($act.Tier -eq 'FREE' -and $act.Recommendation.Optimal) {
 }
 
 # ---- auth token check ----
+# Re-read expiry after the renewal/capture pass above to avoid a stale EXPIRED warning.
 $tok = $snap.TokenRemainingHours
+try { $tok = (Get-CmoSnapshot -Routing $routing).TokenRemainingHours } catch { }
 if ($null -ne $tok) {
     if ($tok -le 0) {
         if (Invoke-CmoToast -Key 'Auth' -RateLimitHours 6 -Title 'Cline Model Optimizer' `

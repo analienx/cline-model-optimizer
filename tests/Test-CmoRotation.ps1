@@ -189,6 +189,12 @@ try {
     Assert-Cmo ($renewedCred.ExpiresAtMs -eq 2000000000000) 'ISO expiry was not normalized to milliseconds'
     $rawCred = Get-Content -LiteralPath $script:TestCredPath -Raw
     Assert-Cmo (-not $rawCred.Contains('rotated-access') -and -not $rawCred.Contains('rotated-refresh')) 'renewed tokens must remain DPAPI encrypted'
+
+    # A running Cline owns the active refresh token. Excluding it must avoid any refresh request.
+    $script:RefreshRequest = $null
+    $skipped = @(Update-CmoCapturedCredentialTokens -RefreshBeforeMinutes 999999 -ExcludeEmail @($other))
+    Assert-Cmo (@($skipped | Where-Object { $_.Reason -eq 'active-owned-by-cline' }).Count -ge 1) 'active Cline login should be excluded from external refresh'
+    Assert-Cmo ($null -eq $script:RefreshRequest) 'excluded active login must not call the refresh endpoint'
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -200,5 +206,9 @@ Assert-Cmo (-not $switchSource.Contains("metadata.userInfo = ''")) 'userInfo mus
 $statusSource = Get-Content -LiteralPath (Join-Path $src 'CmoStatus.ps1') -Raw
 Assert-Cmo ($statusSource.Contains('$kind -eq ''both''')) 'Apply next must handle combined switch'
 Assert-Cmo ($statusSource.Contains('$kind -eq ''needs-signin''')) 'Apply next must handle unlock-required plan'
+Assert-Cmo ($statusSource.Contains('Start-CmoManualCredentialRenewal')) 'dashboard must expose manual credential renewal'
+Assert-Cmo ($statusSource.Contains("New-TinyButton 'renew login'")) 'expired login must have a renew button'
+$guardianSource = Get-Content -LiteralPath (Join-Path $src 'CmoGuardian.ps1') -Raw
+Assert-Cmo ($guardianSource.Contains('-ExcludeEmail $excludeRenewal')) 'guardian must not rotate a running Cline login'
 
 Write-Host ("PASS: {0} Cline rotation assertions" -f $script:passed)
