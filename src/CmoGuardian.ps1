@@ -136,6 +136,21 @@ Write-Log ("PLAN: provider=" + $snap.Plan.Provider + " model=" + $snap.Plan.Mode
 try {
     $captured = Update-CmoCapturedCredentials
     if ($captured) { Write-Log ('captured login for rotation: ' + $captured) }
+    # Cline refreshes its active login while it is running, but saved rotation
+    # logins are never loaded by Cline and would otherwise expire silently.
+    # Renew them before planning; values stay DPAPI-protected and are never logged.
+    $renewals = @(Update-CmoCapturedCredentialTokens -RefreshBeforeMinutes 15)
+    foreach ($renewal in @($renewals | Where-Object { $_.Refreshed })) {
+        Write-Log 'renewed saved Cline OAuth login'
+    }
+    # When VS Code is closed, also propagate the active saved login back to
+    # providers.json so Cline starts with the renewed, rotated token.
+    $liveCline = @($snap.Accounts | Where-Object { $_.Provider -eq 'cline' -and $_.Email } | Select-Object -First 1)
+    if ($liveCline.Count -gt 0) {
+        if (Sync-CmoActiveClineCredential -Email ([string]$liveCline[0].Email)) {
+            Write-Log 'active Cline OAuth credential synchronized'
+        }
+    }
     $u = Update-CmoAccountUsages
     $rot = Get-CmoRotationContext
     $plan = Get-CmoAutoSwitchPlan -Routing $routing -Act $act -UsageState $rot.State -AccountCaps $rot.Caps -LiveEmail $rot.LiveEmail

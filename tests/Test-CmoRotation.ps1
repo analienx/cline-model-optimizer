@@ -158,6 +158,37 @@ try {
     $restored = Get-CmoCredentialsFor -Email 'RESOLVED@example.com'
     Assert-Cmo ($restored.Token -eq 'new-access') 'case-insensitive credential lookup failed'
     Assert-Cmo ($restored.Metadata.userInfo.email -eq 'resolved@example.com') 'captured metadata was not restored'
+
+    # Token renewal must use Cline's exact refresh contract and rotate both
+    # encrypted token values without leaking either into the credential file.
+    $script:RefreshRequest = $null
+    function Invoke-RestMethod {
+        param($Uri, $Method, $ContentType, $Body, $TimeoutSec)
+        $script:RefreshRequest = [pscustomobject]@{
+            Uri = $Uri; Method = $Method; ContentType = $ContentType
+            Body = ($Body | ConvertFrom-Json)
+        }
+        return [pscustomobject]@{
+            data = [pscustomobject]@{
+                accessToken = 'rotated-access'
+                refreshToken = 'rotated-refresh'
+                expiresAt = '2033-05-18T03:33:20.000Z'
+            }
+        }
+    }
+    $renewed = Invoke-CmoRefreshCapturedCredential -Email 'resolved@example.com' -Force
+    Assert-Cmo $renewed.Refreshed 'expired captured token should renew'
+    Assert-Cmo ($script:RefreshRequest.Uri -eq 'https://api.cline.bot/api/v1/auth/refresh') 'refresh endpoint changed'
+    Assert-Cmo ($script:RefreshRequest.Method -eq 'Post') 'refresh must be POST'
+    Assert-Cmo ($script:RefreshRequest.ContentType -eq 'application/json') 'refresh must send JSON'
+    Assert-Cmo ($script:RefreshRequest.Body.granttype -eq 'refresh_token') 'refresh grant type changed'
+    Assert-Cmo ($script:RefreshRequest.Body.refreshtoken -eq 'new-refresh') 'refresh must use saved refresh token'
+    $renewedCred = Get-CmoCredentialsFor -Email 'resolved@example.com'
+    Assert-Cmo ($renewedCred.Token -eq 'rotated-access') 'renewed access token was not stored'
+    Assert-Cmo ($renewedCred.RefreshToken -eq 'rotated-refresh') 'rotated refresh token was not stored'
+    Assert-Cmo ($renewedCred.ExpiresAtMs -eq 2000000000000) 'ISO expiry was not normalized to milliseconds'
+    $rawCred = Get-Content -LiteralPath $script:TestCredPath -Raw
+    Assert-Cmo (-not $rawCred.Contains('rotated-access') -and -not $rawCred.Contains('rotated-refresh')) 'renewed tokens must remain DPAPI encrypted'
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
