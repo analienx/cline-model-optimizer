@@ -176,17 +176,23 @@ try {
             }
         }
     }
+    # Simulate credentials captured by an older CMO build that had no refreshedAt field.
+    $legacyStore = Get-CmoCredStore
+    $legacyStore['resolved@example.com'].PSObject.Properties.Remove('refreshedAt')
+    Save-CmoCredStore -Store $legacyStore | Out-Null
     $renewed = Invoke-CmoRefreshCapturedCredential -Email 'resolved@example.com' -Force
     Assert-Cmo $renewed.Refreshed 'expired captured token should renew'
     Assert-Cmo ($script:RefreshRequest.Uri -eq 'https://api.cline.bot/api/v1/auth/refresh') 'refresh endpoint changed'
     Assert-Cmo ($script:RefreshRequest.Method -eq 'Post') 'refresh must be POST'
     Assert-Cmo ($script:RefreshRequest.ContentType -eq 'application/json') 'refresh must send JSON'
-    Assert-Cmo ($script:RefreshRequest.Body.granttype -eq 'refresh_token') 'refresh grant type changed'
-    Assert-Cmo ($script:RefreshRequest.Body.refreshtoken -eq 'new-refresh') 'refresh must use saved refresh token'
+    Assert-Cmo ($script:RefreshRequest.Body.grantType -eq 'refresh_token') 'refresh grant type changed'
+    Assert-Cmo ($script:RefreshRequest.Body.refreshToken -eq 'new-refresh') 'refresh must use saved refresh token'
     $renewedCred = Get-CmoCredentialsFor -Email 'resolved@example.com'
     Assert-Cmo ($renewedCred.Token -eq 'rotated-access') 'renewed access token was not stored'
     Assert-Cmo ($renewedCred.RefreshToken -eq 'rotated-refresh') 'rotated refresh token was not stored'
     Assert-Cmo ($renewedCred.ExpiresAtMs -eq 2000000000000) 'ISO expiry was not normalized to milliseconds'
+    $postRenewStore = Get-CmoCredStore
+    Assert-Cmo ([bool]$postRenewStore['resolved@example.com'].refreshedAt) 'legacy credential record must gain refreshedAt during renewal'
     $rawCred = Get-Content -LiteralPath $script:TestCredPath -Raw
     Assert-Cmo (-not $rawCred.Contains('rotated-access') -and -not $rawCred.Contains('rotated-refresh')) 'renewed tokens must remain DPAPI encrypted'
 

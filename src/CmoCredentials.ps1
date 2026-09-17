@@ -131,9 +131,9 @@ function Invoke-CmoRefreshCapturedCredential {
     }
 
     try {
-        # This is Cline's documented WorkOS refresh contract. Field casing is
-        # intentional: Cline's endpoint requires these lower-case field names.
-        $body = @{ granttype = 'refresh_token'; refreshtoken = [string]$cred.RefreshToken } |
+        # Match the Cline extension refresh contract exactly. The endpoint is
+        # case-sensitive for these JSON property names.
+        $body = @{ refreshToken = [string]$cred.RefreshToken; grantType = 'refresh_token' } |
             ConvertTo-Json -Compress
         $response = Invoke-RestMethod -Uri 'https://api.cline.bot/api/v1/auth/refresh' `
             -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 15
@@ -151,18 +151,24 @@ function Invoke-CmoRefreshCapturedCredential {
             return [pscustomobject]@{ Email = $Email; Refreshed = $false; Reason = 'credential-not-found' }
         }
         $entry = $store[$key]
-        $entry.accessToken = Protect-CmoSecret -Plain $access
-        $entry.refreshToken = Protect-CmoSecret -Plain $refresh
-        $entry.expiresAt = $expires
-        $entry.refreshedAt = (Get-Date).ToString('o')
+        $entry | Add-Member -NotePropertyName accessToken -NotePropertyValue (Protect-CmoSecret -Plain $access) -Force
+        $entry | Add-Member -NotePropertyName refreshToken -NotePropertyValue (Protect-CmoSecret -Plain $refresh) -Force
+        $entry | Add-Member -NotePropertyName expiresAt -NotePropertyValue $expires -Force
+        # Legacy credential records predate refreshedAt; Add-Member -Force both
+        # migrates those records and updates newer ones safely.
+        $entry | Add-Member -NotePropertyName refreshedAt -NotePropertyValue ((Get-Date).ToString('o')) -Force
         Save-CmoCredStore -Store $store | Out-Null
         return [pscustomobject]@{ Email = $key; Refreshed = $true; Reason = 'refreshed'; ExpiresAtMs = $expires }
     } catch {
         # Do not surface provider exception text: it can contain request context.
         $statusCode = 0
-        try { $statusCode = [int]$_.Exception.Response.StatusCode } catch { }
+        $failureType = $_.Exception.GetType().FullName
+        try {
+            $response = $_.Exception.Response
+            if ($response -and $response.StatusCode) { $statusCode = [int]$response.StatusCode }
+        } catch { }
         $reason = if ($statusCode -in @(400, 401, 403)) { 'refresh-token-rejected' } else { 'refresh-request-failed' }
-        return [pscustomobject]@{ Email = $Email; Refreshed = $false; Reason = $reason }
+        return [pscustomobject]@{ Email = $Email; Refreshed = $false; Reason = $reason; StatusCode = $statusCode; FailureType = $failureType }
     }
 }
 
@@ -287,6 +293,7 @@ function Get-CmoCapturedAccounts {
             ExpiresAtMs = [long]$c.expiresAt
             Expired = ([long]$c.expiresAt -lt $nowMs)
             CapturedAt = [string]$c.capturedAt
+            RefreshedAt = [string]$c.refreshedAt
         }
     }
     return @($out | Sort-Object Email)
