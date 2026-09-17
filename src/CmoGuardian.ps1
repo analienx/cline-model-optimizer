@@ -43,7 +43,7 @@ function Invoke-CmoToast {
 }
 
 $state = @{ LastCheck = (Get-Date).ToString('o'); LastStatus = 'init'
-            LastToastPaid = $null; LastToastAuth = $null
+            LastToastPaid = $null; LastToastAuth = $null; LastToastAutoSwitch = $null
             TierMinutes = @{ free = 0.0; subscription = 0.0; paid = 0.0 }; TierDate = (Get-Date -Format 'yyyy-MM-dd')
             AccountMinutes = @{} }
 if (Test-Path -LiteralPath $gState) {
@@ -51,6 +51,7 @@ if (Test-Path -LiteralPath $gState) {
         $s = Get-Content -LiteralPath $gState -Raw | ConvertFrom-Json
         $state.LastCheck = $s.LastCheck; $state.LastStatus = $s.LastStatus
         $state.LastToastPaid = $s.LastToastPaid; $state.LastToastAuth = $s.LastToastAuth
+        $state.LastToastAutoSwitch = $s.LastToastAutoSwitch
         $state.TierDate = $s.TierDate
         foreach ($k in 'free','subscription','paid') { $state.TierMinutes[$k] = [double]$s.TierMinutes.$k }
         if ($s.AccountMinutes) { foreach ($k in @($s.AccountMinutes.PSObject.Properties.Name)) { $state.AccountMinutes[$k] = [double]$s.AccountMinutes.$k } }
@@ -61,6 +62,7 @@ function Save-State([string]$status) {
     $state.LastCheck = (Get-Date).ToString('o')
     @{ LastCheck = $state.LastCheck; LastStatus = $status
        LastToastPaid = $state.LastToastPaid; LastToastAuth = $state.LastToastAuth
+       LastToastAutoSwitch = $state.LastToastAutoSwitch
        TierMinutes = $state.TierMinutes; TierDate = $state.TierDate; AccountMinutes = $state.AccountMinutes } |
         ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $gState -Force
 }
@@ -127,38 +129,63 @@ $dynCount = @($snap.DynamicFree.Models).Count
 Write-Log ("free list: {0} models - source={1} fresh={2}{3}" -f $dynCount, $snap.DynamicFree.Source, $snap.DynamicFree.Fresh, $(if ($snap.DynamicFree.Error) { ' error=' + $snap.DynamicFree.Error } else { '' }))
 Write-Log ("ACT: provider=" + $act.Provider + " model=" + $act.Model + " tier=" + $act.Tier + " | optimal=" + $act.Recommendation.Optimal)
 Write-Log ("PLAN: provider=" + $snap.Plan.Provider + " model=" + $snap.Plan.Model + " tier=" + $snap.Plan.Tier)
-# ---- auto-switch: the original idea, adapted (see Get-CmoAutoSwitchPlan) ----
-# When the live model is capped (inferred) or a free model is unused while a
-# subscription burns, plan the next model. VS Code CLOSED -> apply it via
-# CmoApply (the extension would overwrite our write while it runs). VS Code
-# OPEN -> advise via toast, never fight the running extension.
+# ---- auto-switch: account-first rotation (see Get-CmoAutoSwitchPlan) ----
+# Capture the current login (so rotation tokens accumulate as the user signs
+# into different accounts), refresh captured accounts' usage, then apply the
+# plan. VS Code CLOSED -> apply; VS Code OPEN -> advise via toast.
 try {
-    $plan = Get-CmoAutoSwitchPlan -Routing $routing -Act $act -UsageState $u
+    $captured = Update-CmoCapturedCredentials
+    if ($captured) { Write-Log ('captured login for rotation: ' + $captured) }
+    $u = Update-CmoAccountUsages
+    $rot = Get-CmoRotationContext
+    $plan = Get-CmoAutoSwitchPlan -Routing $routing -Act $act -UsageState $rot.State -AccountCaps $rot.Caps -LiveEmail $rot.LiveEmail
     if ($plan) {
         $vsOpen = @(Get-Process -Name 'Code' -ErrorAction SilentlyContinue).Count -gt 0
-        if ($vsOpen) {
-            Write-Log ("auto-switch plan: " + $plan.From + " -> " + $plan.To + " (rank " + $plan.Rank + ", " + $plan.Reason + ") - VS Code running, advising only")
-            $msg = switch ([string]$plan.Reason) {
-                'cap'              { ($plan.From + " free tier is used up - " + $plan.To + " is still free. Close VS Code to let me switch, or pick it on the dashboard") }
-                'all-free-capped'  { ("all free models are used up today - " + $plan.To + " (subscription) is the fallback. Close VS Code to let me switch") }
-                default            { ("subscription model in use - " + $plan.To + " is still free. Close VS Code to let me switch, or pick it on the dashboard") }
+        $kind = [string]$plan.Kind
+        if ($kind -eq 'needs-signin') {
+            # informational only: a tracked account may still have budget; one
+            # sign-in (while it is the active login) captures its token.
+            Write-Log ('rotation wants sign-in: ' + $plan.Account + ' (' + $plan.Reason + ') - captured logins: ' + (@($rot.Captured | ForEach-Object { $_.Email + $(if ($_.Expired) { ' (expired)' }) }) -join ', '))
+        } elseif ($vsOpen) {
+            Write-Log ("auto-switch plan (" + $kind + "): " + $plan.From + " -> " + $plan.To + $(if ($plan.Account) { ' @ ' + $plan.Account }) + " - VS Code running, advising only")
+            $msg = switch ($kind) {
+                'account-switch' { ($plan.Account + " still has free budget for " + $plan.To + ". Close VS Code to rotate, or use the dashboard") }
+                'both'           { ($plan.Account + " has free budget for " + $plan.To + ". Close VS Code to switch (account + model)") }
+                default          { ($plan.To + " is available free - close VS Code to let me switch, or pick it on the dashboard") }
             }
             if (Invoke-CmoToast -Key 'AutoSwitch' -RateLimitHours 1 -Title 'Cline Model Optimizer' -Message $msg) {
                 Write-Log 'toast: switch advised'
             }
         } else {
-            $aa = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $PSScriptRoot 'CmoApply.ps1') + '"'),
-                '-Rank', [string]$plan.Rank)
-            $r = Invoke-CmoHidden -File 'powershell.exe' -Arguments $aa
-            $out = (($r.Output + ' ' + $r.Error).Trim())
-            if ($r.ExitCode -eq 0) {
-                Write-Log ("AUTO-SWITCHED " + $plan.From + " -> " + $plan.To + " (rank " + $plan.Rank + ", " + $plan.Reason + ")")
-                Invoke-CmoToast -Key 'AutoSwitch' -RateLimitHours 1 -Title 'Cline Model Optimizer' `
-                    -Message ("Auto-switched to " + $plan.To + " (" + $plan.Reason + ")") | Out-Null
-            } elseif ($r.ExitCode -eq 1) {
-                Write-Log 'auto-switch skipped: VS Code started meanwhile'
+            $ok = $false; $detail = ''
+            if ($kind -eq 'model-switch') {
+                $r = Invoke-CmoHidden -File 'powershell.exe' -Arguments @(
+                    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $PSScriptRoot 'CmoApply.ps1') + '"'),
+                    '-Rank', [string]$plan.Rank)
+                $ok = ($r.ExitCode -eq 0); $detail = (($r.Output + ' ' + $r.Error).Trim())
             } else {
-                Write-Log ("auto-switch apply failed (exit " + $r.ExitCode + "): " + $out)
+                # account-switch or both: rotate login first (VS Code is closed)
+                $r = Invoke-CmoHidden -File 'powershell.exe' -Arguments @(
+                    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $PSScriptRoot 'CmoSwitchAccount.ps1') + '"'),
+                    '-Email', ('"' + $plan.Account + '"'))
+                if ($r.ExitCode -eq 0) {
+                    Write-Log ('ROTATED ACCOUNT -> ' + $plan.Account)
+                    if ($kind -eq 'both') {
+                        $r2 = Invoke-CmoHidden -File 'powershell.exe' -Arguments @(
+                            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $PSScriptRoot 'CmoApply.ps1') + '"'),
+                            '-Rank', [string]$plan.Rank)
+                        $ok = ($r2.ExitCode -eq 0); $detail = (($r2.Output + ' ' + $r2.Error).Trim())
+                    } else { $ok = $true }
+                } else {
+                    $detail = 'switch-account failed (exit ' + $r.ExitCode + '): ' + (($r.Output + ' ' + $r.Error).Trim())
+                }
+            }
+            if ($ok) {
+                Write-Log ("AUTO-SWITCH (" + $kind + ") " + $plan.From + " -> " + $plan.To + $(if ($plan.Account -and $kind -ne 'model-switch') { ' @ ' + $plan.Account }))
+                Invoke-CmoToast -Key 'AutoSwitch' -RateLimitHours 1 -Title 'Cline Model Optimizer' `
+                    -Message ("Auto-switched" + $(if ($plan.Account -and $kind -ne 'model-switch') { ' to ' + $plan.Account }) + ": " + $plan.To + " (" + $plan.Reason + ")") | Out-Null
+            } else {
+                Write-Log ('auto-switch apply failed: ' + $detail)
             }
         }
     }

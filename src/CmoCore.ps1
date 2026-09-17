@@ -11,6 +11,8 @@ function Get-CmoDataDir {
 . (Join-Path $PSScriptRoot 'CmoAccounts.ps1')
 # real usage from Cline's API + automatic cap-hit detection from transcripts
 . (Join-Path $PSScriptRoot 'CmoUsage.ps1')
+# captured logins for account rotation (DPAPI-encrypted, local only)
+. (Join-Path $PSScriptRoot 'CmoCredentials.ps1')
 
 function Get-CmoRoutingConfig {
     param([string]$ConfigPath)
@@ -637,13 +639,14 @@ function Get-CmoSnapshot {
 
 
 function Get-CmoAutoSwitchPlan {
-    # The original idea, adapted to what is technically possible: Cline holds ONE
-    # login at a time (other accounts have no tokens on disk - obtained via
-    # per-account browser OAuth), so ACCOUNT switching cannot be automated.
-    # MODEL switching within the signed-in account can: when the live free model
-    # is capped, plan the next GREEN free model on the ladder; when every free
-    # model is capped, optionally fall back to subscription (never paid).
-    param([object]$Routing, [object]$Act, [object]$UsageState)
+    # THE ORIGINAL RULE, full version:
+    #   preferred model A runs on the signed-in account until THAT ACCOUNT'S free
+    #   tier for A is used up -> rotate to the NEXT ACCOUNT (token captured) which
+    #   still has A's free tier -> ... -> only when NO account has A left does the
+    #   ladder move to model B (preferring an account that still has B).
+    # Account switching needs captured tokens (CmoCredentials.ps1) and happens
+    # only while VS Code is closed. Subscription is the last-resort fallback.
+    param([object]$Routing, [object]$Act, [object]$UsageState, [object]$AccountCaps, [string]$LiveEmail)
     if (-not $Act) { return $null }
     $enabled = $true; $allowSub = $true
     try {
@@ -654,44 +657,283 @@ function Get-CmoAutoSwitchPlan {
     } catch { }
     if (-not $enabled) { return $null }
 
-    $caps = Get-CmoInferredCaps -State $UsageState
+    $preferred = @()
+    try { $preferred = @($Routing.freeSelection.preferredFreeModels | Where-Object { $_ }) } catch { }
+    if ($preferred.Count -eq 0) { return $null }
     $eff = Get-CmoEffectiveStrategy -Routing $Routing -Mode 'act'
     $steps = @($eff.Steps)
     if ($steps.Count -eq 0) { return $null }
+
     $curCore = Get-CmoModelCoreId -Id ([string]$Act.Model)
     $curTier = [string]$Act.Tier
+    $live = [string]$LiveEmail
+    if (-not $live) { try { $live = [string]$UsageState.email } catch { } }
 
-    # first GREEN free step (FREE tier, not capped). If the current model is
-    # that step, the user is already in the best possible place - no plan.
-    $freeRank = 0; $freeModel = ''
-    for ($i = 0; $i -lt $steps.Count; $i++) {
-        $s = $steps[$i]
-        if ([string]$s.tier -ne 'FREE') { continue }
-        $core = Get-CmoModelCoreId -Id ([string]$s.model)
-        if ($caps.Contains($core)) { continue }
-        if ($core -eq $curCore) { return $null }   # current free model is green
-        if ($freeRank -eq 0) { $freeRank = $i + 1; $freeModel = [string]$s.model }
+    # rotation order: ONE shared definition (Get-CmoAccountRotationOrder) so the
+    # planner and the window always show the same sequence.
+    $order = @(Get-CmoAccountRotationOrder -LiveEmail $live)
+    $usable = {
+        # live account is always usable; others need a CAPTURED, unexpired token
+        param($e)
+        if ($e -eq $live) { return $true }
+        $c = @(Get-CmoCapturedAccounts | Where-Object { ([string]$_.Email) -eq $e })
+        return ($c.Count -gt 0 -and -not $c[0].Expired)
+    }
+    $hasData = {
+        # usage known (fetched at least once) - unknown is NOT green, it's 'maybe'
+        param($e)
+        try { return ($UsageState.perAccount -and $UsageState.perAccount.Contains($e)) } catch { return $false }
+    }
+    $capped = { param($e, $core)
+        try { return ($AccountCaps -and $AccountCaps.Contains($e) -and $AccountCaps[$e].Contains($core)) } catch { return $false }
     }
 
-    $curCapped = $caps.Contains($curCore)
-    if ($curTier -eq 'FREE' -and $curCapped) {
-        if ($freeRank -gt 0) {
-            return @{ From = [string]$Act.Model; To = $freeModel; Rank = $freeRank; Reason = 'cap' }
+    # greenAccounts(core): rotation-ordered accounts with DATA that is not capped
+    $greenAccounts = {
+        param($core)
+        $g = @()
+        foreach ($e in $order) {
+            if (-not (& $usable $e)) { continue }
+            if (-not (& $hasData $e)) { continue }
+            if (& $capped $e $core) { continue }
+            $g += $e
         }
-        # every free model is capped today -> optional subscription fallback
+        return $g
+    }
+
+    $rankFor = {
+        param($core)
+        for ($i = 0; $i -lt $steps.Count; $i++) {
+            if ((Get-CmoModelCoreId -Id ([string]$steps[$i].model)) -eq $core) { return ($i + 1) }
+        }
+        return 0
+    }
+
+    # where are we in the preferred-model ladder? unknown core -> treat as first
+    $prefIdx = 0
+    for ($i = 0; $i -lt $preferred.Count; $i++) {
+        if ((Get-CmoModelCoreId -Id ([string]$preferred[$i])) -eq $curCore) { $prefIdx = $i; break }
+    }
+
+    $curGreen = @($order | Where-Object { (& $hasData $_) -and (-not (& $capped $_ $curCore)) })
+    if ($curTier -eq 'FREE' -and $curGreen) {
+        # current model still has free budget SOMEWHERE. If it is this account,
+        # nothing to do; otherwise rotate to the next account keeping the model.
+        if (-not (& $capped $live $curCore)) { return $null }
+        foreach ($e in $curGreen) {
+            if ($e -eq $live) { continue }
+            if (& $usable $e) {
+                return @{ Kind = 'account-switch'; From = ([string]$Act.Model + ' @ ' + $live); To = [string]$Act.Model; Rank = (& $rankFor $curCore); Account = $e; Reason = 'account-rotation' }
+            }
+        }
+        # green account exists but no token -> one sign-in unlocks the rotation
+        foreach ($e in $curGreen) {
+            if ($e -ne $live) {
+                return @{ Kind = 'needs-signin'; From = ([string]$Act.Model + ' @ ' + $live); To = [string]$Act.Model; Account = $e; Reason = 'account-rotation' }
+            }
+        }
+        return $null
+    }
+    if ($curTier -eq 'FREE' -and -not $curGreen) {
+        # this model is exhausted on every account we have data for
+        for ($j = $prefIdx + 1; $j -lt $preferred.Count; $j++) {
+            $m = [string]$preferred[$j]
+            # @() is load-bearing: PowerShell unrolls a 1-element array returned
+            # from a scriptblock to a bare string, and $g[0] on a string is its
+            # FIRST CHARACTER (so the account showed up as 'm', not an email).
+            $g = @(& $greenAccounts (Get-CmoModelCoreId -Id $m))
+            if ($g.Count -gt 0) {
+                $tgt = [string]$g[0]
+                $rk = & $rankFor (Get-CmoModelCoreId -Id $m)
+                if ($tgt -eq $live) {
+                    return @{ Kind = 'model-switch'; From = [string]$Act.Model; To = $m; Rank = $rk; Account = $live; Reason = 'next-model' }
+                }
+                return @{ Kind = 'both'; From = [string]$Act.Model; To = $m; Rank = $rk; Account = $tgt; Reason = 'next-model' }
+            }
+        }
+        # user rule: an account we have NO data for might still have budget -
+        # one sign-in resolves it. Only fall back to subscription when the user
+        # disables that nudge... (needs-signin is informational; sub still wins)
+        $unknown = @($order | Where-Object { -not (& $hasData $_) })
+        if ($unknown.Count -gt 0) {
+            return @{ Kind = 'needs-signin'; From = [string]$Act.Model; To = ''; Account = [string]$unknown[0]; Reason = 'unknown-budget' }
+        }
         if ($allowSub) {
             for ($i = 0; $i -lt $steps.Count; $i++) {
-                $s = $steps[$i]
-                if ([string]$s.tier -eq 'SUBSCRIPTION') {
-                    return @{ From = [string]$Act.Model; To = [string]$s.model; Rank = ($i + 1); Reason = 'all-free-capped' }
+                if ([string]$steps[$i].tier -eq 'SUBSCRIPTION') {
+                    return @{ Kind = 'model-switch'; From = [string]$Act.Model; To = [string]$steps[$i].model; Rank = ($i + 1); Account = $live; Reason = 'all-free-capped' }
                 }
             }
         }
         return $null
     }
-    # subscription/paid in use while a green free model exists -> back to free
-    if ($curTier -ne 'FREE' -and $freeRank -gt 0) {
-        return @{ From = [string]$Act.Model; To = $freeModel; Rank = $freeRank; Reason = 'free-available' }
+    # subscription / paid / unknown in use -> back to free (rotation order)
+    for ($j = 0; $j -lt $preferred.Count; $j++) {
+        $m = [string]$preferred[$j]
+        $g = @(& $greenAccounts (Get-CmoModelCoreId -Id $m))
+        if ($g.Count -gt 0) {
+            $tgt = [string]$g[0]
+            $rk = & $rankFor (Get-CmoModelCoreId -Id $m)
+            if ($tgt -eq $live) {
+                return @{ Kind = 'model-switch'; From = [string]$Act.Model; To = $m; Rank = $rk; Account = $live; Reason = 'free-available' }
+            }
+            return @{ Kind = 'both'; From = [string]$Act.Model; To = $m; Rank = $rk; Account = $tgt; Reason = 'free-available' }
+        }
     }
     return $null
+}
+function Get-CmoRotationQueue {
+    # THE USER'S RULE, materialised for display AND for the planner:
+    #   preferred model A runs on the signed-in account until THAT account's free
+    #   tier for A is used up -> rotate to the next account which still has A ->
+    #   only when NO account has A left does the ladder move to model B.
+    # So the sequence is MODEL-MAJOR: every account for model #1 first, then every
+    # account for model #2, ... and the subscription ladder only at the very end.
+    #
+    # States per (model, account):
+    #   ready   - usable now (usage known, not capped) and, if not live, token captured
+    #   capped  - this account's free tier for this model is used up today
+    #   signin  - no captured token yet: unknown budget, one sign-in unlocks it
+    #   unknown - token captured but usage never fetched
+    param([object]$Routing, [object]$Act, [object]$UsageState, [object]$AccountCaps, [string]$LiveEmail)
+
+    $curModel = ''
+    if ($Act) { $curModel = [string]$Act.Model }
+    $curCore = ''
+    if ($curModel) { $curCore = Get-CmoModelCoreId -Id $curModel }
+
+    $live = [string]$LiveEmail
+    if (-not $live) { try { $live = [string]$UsageState.email } catch { } }
+
+    $preferred = @()
+    try { $preferred = @($Routing.freeSelection.preferredFreeModels | Where-Object { $_ }) } catch { }
+    $steps = @()
+    try { $steps = @((Get-CmoEffectiveStrategy -Routing $Routing -Mode 'act').Steps) } catch { }
+
+    # a PAID/subscription model must never be shown as the free rung 'IN USE', even
+    # when its core id matches ('cline-pass/deepseek-v4.1-flash' vs the free
+    # 'cline-free/deepseek-v4.1-flash' both reduce to 'deepseek-v4.1-flash').
+    $curTier = ''
+    if ($Act) { $curTier = [string]$Act.Tier }
+    $curSub = ($curTier -eq 'SUBSCRIPTION')
+
+    $captured = @()
+    try { $captured = @(Get-CmoCapturedAccounts) } catch { }
+
+    # rotation order: same shared definition as the planner (see
+    # Get-CmoAccountRotationOrder) - the sequence shown here IS what runs.
+    $order = @(Get-CmoAccountRotationOrder -LiveEmail $live)
+
+    $capturedFor = { param($e) return @($captured | Where-Object { ([string]$_.Email) -eq $e } | Select-Object -First 1) }
+    $isCaptured = { param($e)
+        $hit = @(& $capturedFor $e)
+        return ($hit.Count -gt 0 -and -not $hit[0].Expired)
+    }
+    $hasData = { param($e) try { return ($UsageState.perAccount -and $UsageState.perAccount.Contains($e)) } catch { return $false } }
+    $capped = { param($e, $core)
+        if (-not $core) { return $false }
+        try { return ($AccountCaps -and $AccountCaps.Contains($e) -and $AccountCaps[$e].Contains($core)) } catch { return $false } }
+    $rankFor = { param($core)
+        for ($i = 0; $i -lt $steps.Count; $i++) {
+            if ((Get-CmoModelCoreId -Id ([string]$steps[$i].model)) -eq $core) { return ($i + 1) }
+        }
+        return 0 }
+    $tierFor = { param($core)
+        for ($i = 0; $i -lt $steps.Count; $i++) {
+            if ((Get-CmoModelCoreId -Id ([string]$steps[$i].model)) -eq $core) { return [string]$steps[$i].tier }
+        }
+        return 'FREE' }
+
+    $models = @(); $seq = @(); $exhausted = @(); $signin = @()
+    $rn = 0
+    foreach ($m in $preferred) {
+        $rn++
+        $core = Get-CmoModelCoreId -Id ([string]$m)
+        $rk = & $rankFor $core
+        if ($rk -lt 1) { $rk = $rn }
+        $tier = & $tierFor $core
+        $accStates = @(); $readyEmails = @(); $cappedEmails = @()
+        foreach ($e in $order) {
+            if (-not $e) { continue }
+            $credential = @(& $capturedFor $e)
+            $capturedOk = ($credential.Count -gt 0 -and -not $credential[0].Expired)
+            $expired = ($credential.Count -gt 0 -and [bool]$credential[0].Expired)
+            $fetchedAt = $null
+            $ageMinutes = $null
+            try {
+                if (& $hasData $e) {
+                    $fetchedAt = $UsageState.perAccount[$e].fetchedAt
+                    if ($fetchedAt) {
+                        $ageMinutes = [math]::Max(0, [math]::Round(((Get-Date) - [DateTimeOffset]::Parse([string]$fetchedAt).LocalDateTime).TotalMinutes))
+                    }
+                }
+            } catch { }
+            $state = 'ready'
+            if (& $capped $e $core) { $state = 'capped' }
+            elseif ($e -ne $live -and -not (& $isCaptured $e)) { $state = 'signin' }
+            elseif (-not (& $hasData $e)) { $state = 'unknown' }
+            $stateLabel = switch ($state) {
+                'ready'   { 'AVAILABLE' }
+                'capped'  { 'DEPLETED' }
+                'signin'  { $(if ($expired) { 'TOKEN EXPIRED' } else { 'SIGN IN' }) }
+                default   { 'NOT CHECKED' }
+            }
+            $reason = switch ($state) {
+                'ready'   { 'free budget has not been depleted' }
+                'capped'  { 'free tier used up for this model today' }
+                'signin'  { $(if ($expired) { 'saved login expired; sign in once to renew it' } else { 'no saved login; sign in once to capture it' }) }
+                default   { 'authenticated, but usage has not been fetched yet' }
+            }
+            $accStates += [pscustomobject]@{
+                Email = $e; State = $state; StateLabel = $stateLabel; Reason = $reason
+                Live = ($e -eq $live); Captured = $capturedOk; Expired = $expired
+                FetchedAt = $fetchedAt; AgeMinutes = $ageMinutes
+            }
+            if ($state -eq 'ready') { $readyEmails += $e }
+            if ($state -eq 'capped') { $cappedEmails += $e }
+        }
+        $models += [pscustomobject]@{
+            Rank = $rk; Model = [string]$m; Core = $core; Tier = $tier
+            Accounts = $accStates; Ready = $readyEmails; Capped = $cappedEmails
+            Current = (($core -eq $curCore) -and (-not $curSub)) }
+        foreach ($e in $readyEmails) {
+            $seq += [pscustomobject]@{
+                Rank = $rk; Model = [string]$m; Core = $core; Tier = $tier; Account = $e
+                Live = ($e -eq $live); Current = (($core -eq $curCore) -and ($e -eq $live) -and (-not $curSub)) }
+        }
+        if ($cappedEmails.Count -gt 0 -and $readyEmails.Count -eq 0) {
+            $exhausted += [pscustomobject]@{ Model = [string]$m; Rank = $rk; Accounts = $cappedEmails }
+        }
+        foreach ($st in @($accStates | Where-Object { $_.State -eq 'signin' })) {
+            $signin += [pscustomobject]@{ Model = [string]$m; Rank = $rk; Account = $st.Email }
+        }
+    }
+
+    # subscription ladder = explicit last-resort tail (never counted as free)
+    $subs = @()
+    $allowSub = $true
+    try { if ($Routing.autoSwitch.allowSubscriptionFallback -eq $false) { $allowSub = $false } } catch { }
+    for ($i = 0; $i -lt $steps.Count; $i++) {
+        if ([string]$steps[$i].tier -ne 'SUBSCRIPTION') { continue }
+        $i2 = $i
+        $subs += [pscustomobject]@{
+            Rank = ($i2 + 1); Model = [string]$steps[$i].model
+            Tier = 'SUBSCRIPTION'; Provider = [string]$steps[$i].provider }
+    }
+
+    $next = $null
+    foreach ($s in $seq) {
+        if (-not $s.Current) { $next = $s; break }
+    }
+    $here = $null
+    foreach ($s in $seq) {
+        if ($s.Current) { $here = $s; break }
+    }
+
+    return [pscustomobject]@{
+        LiveEmail = $live; CurrentModel = $curModel
+        CurrentTier = $curTier; CurrentIsSubscription = $curSub
+        Models = $models; Sequence = $seq; Here = $here; Next = $next
+        Exhausted = $exhausted; Signin = $signin
+        Subscription = $subs; AllowSub = $allowSub }
 }

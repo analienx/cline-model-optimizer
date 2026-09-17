@@ -16,10 +16,12 @@ This tool watches Cline's own data store and gives you:
 - **Full visibility** - which model is active in Plan/Act mode, its tier
   (FREE / SUBSCRIPTION / PAID), which account, reasoning effort, auth-token expiry
 - **Usage accounting** - minutes spent per tier per day, per-session model/cost history
+- **Account-first free rotation** - keeps the preferred free model while rotating through
+  authenticated Cline accounts with budget left; only then advances to the next model
 - **Advisory guardian** - toast notifications (rate-limited) when a paid or subscription
   model is in use while free alternatives exist, and when Cline auth is about to expire
-- **One-click model apply** - safely rewrites Cline's active model config (with backup,
-  only while VS Code is closed)
+- **Safe model/account switching** - backs up Cline state and only writes while VS Code is
+  closed, so the running extension cannot overwrite the change from memory
 
 Sister project of
 [remote-desktop-commander-agent-control](https://github.com/analienx/remote-desktop-commander-agent-control)
@@ -87,18 +89,23 @@ shows the resolved ladder live, including each step's source.
 |---|---|
 | See what's running / which tier / which account | Double-click **Cline Model Optimizer** |
 | Force a check | Dashboard → **Run guardian now** |
-| Switch Plan+Act to the top free model | Dashboard → **Apply preferred** (close VS Code first) |
+| Apply the next cap-aware free route | Dashboard → **Apply next** (close VS Code first) |
+| Unlock another account for rotation | Dashboard → **unlock <email>**, then complete Cline's normal sign-in |
 | Tune the strategy | Edit `%LOCALAPPDATA%\ClineModelOptimizer\model-routing.json` |
 | See history | Dashboard recent-sessions; logs in `%LOCALAPPDATA%\ClineModelOptimizer` |
 | Remove everything | `powershell -File .\uninstall.ps1` |
 
 ## Safety model
 
-- Cline's state is read **read-only** by the guardian - it never modifies anything
-- **Apply** is the only writer: refuses to run while VS Code is open (the extension
-  would overwrite from memory), backs up `globalState.json` + `providers.json` first
-- **Secrets are never touched**: `secrets.json` and auth tokens are never read, logged,
-  or displayed - only account email/id and token *expiry* are surfaced
+- The guardian never rewrites Cline state while VS Code is running; it only observes
+  model/usage state and prepares a switch plan
+- Model/account writes require VS Code to be closed and back up `globalState.json` +
+  `providers.json` before changing Cline's persisted provider settings
+- Account rotation reads the OAuth login that Cline already created and stores an
+  encrypted copy under `%LOCALAPPDATA%\ClineModelOptimizer`; access/refresh tokens and
+  auth metadata are protected with Windows DPAPI (`CurrentUser`), never committed,
+  logged, or displayed, and passwords are never requested or stored
+- `secrets.json` is never read or modified
 - Toasts are rate-limited (2 h paid-in-use, 6 h auth) - no nagging
 - Exit codes: `0` optimal-free · `1` free-but-suboptimal · `2` paid/subscription-in-use ·
   `3` auth-warning · `4` no Cline state
@@ -110,6 +117,15 @@ Dark themed (Catppuccin-inspired, matching RDC Agent Control):
 - **ACTIVE MODEL** - Plan/Act provider, model, tier badge, reasoning effort, verdict,
   token expiry countdown, today's tier-usage minutes
 - **ACCOUNTS** - signed-in provider accounts (email, last-used marker)
+- **ROTATION** - the same model across accounts, in order, with a per-account state
+  dot: green = free budget left · red = used up today · grey = not measured yet ·
+  amber = **not unlocked** (tracked, but Cline has never signed in with it on this
+  machine, so no token is captured and rotation cannot use its budget). Amber rows
+  carry an inline **unlock \<email\>** button: click it, then sign out in Cline and
+  sign in with that address (it is copied to the clipboard) - the new login is
+  detected live, its token is captured encrypted, and the account joins the
+  rotation. Tokens exist only after the real OAuth sign-in, so accounts can never
+  be unlocked without you - and no passwords are stored, ever.
 - **PREFERRED LADDER** - resolved dynamic ladder with per-step tier + source
 - **RECENT SESSIONS** - per-session model, tier and title history
 
@@ -118,7 +134,7 @@ Dark themed (Catppuccin-inspired, matching RDC Agent Control):
 **Dashboard says `CLINE STATE NOT FOUND`** - open Cline in VS Code once so it creates
 `~\.cline\data`, then hit Refresh.
 
-**`Apply preferred` refuses** - VS Code is running. Close it and retry (by design; the
+**`Apply next` refuses** - VS Code is running. Close it and retry (by design; the
 Cline extension rewrites its config from memory on exit).
 
 **Toasts about a paid model right after you deliberately chose one** - expected; either

@@ -18,12 +18,22 @@ if (-not (Test-Path -LiteralPath $dataDir)) {
 
 Step ('Copying tooling to ' + $InstallDir)
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-Copy-Item -Path (Join-Path $srcDir '*') -Destination $InstallDir -Recurse -Force
+# ship only real sources: the dev UI-audit harness drops throwaway copies named
+# _*-status.ps1 into src/ and those must never reach an install.
+foreach ($f in @(Get-ChildItem -Path (Join-Path $srcDir '*') -File | Where-Object { $_.Name -notlike '_*' })) {
+    Copy-Item -LiteralPath $f.FullName -Destination (Join-Path $InstallDir $f.Name) -Force
+}
+# a previous install may still hold a stale harness copy - remove it
+foreach ($junk in @(Get-ChildItem -Path (Join-Path $InstallDir '_*-status.ps1') -File -ErrorAction SilentlyContinue)) {
+    Remove-Item -LiteralPath $junk.FullName -Force
+}
 Ok ('installed: ' + ((Get-ChildItem $InstallDir -File | Select-Object -ExpandProperty Name) -join ', '))
 
 Step 'Registering scheduled task (logon + every 5 min)'
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument ('-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + (Join-Path $InstallDir 'CmoGuardian.ps1') + '"')
+$hiddenRunner = Join-Path $InstallDir 'RunHidden.vbs'
+$wscript = Join-Path $env:SystemRoot 'System32\wscript.exe'
+$action = New-ScheduledTaskAction -Execute $wscript `
+    -Argument ('//B //NoLogo "' + $hiddenRunner + '" "' + (Join-Path $InstallDir 'CmoGuardian.ps1') + '"')
 $lt = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $rt = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
     -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)

@@ -5,3 +5,6 @@ Thumbs.db
 src/free-models.json
 src/guardian-state.json
 src/guardian-status.json
+# headless UI-audit harness renders a temporary copy of CmoStatus.ps1 here
+src/_shot-status.ps1
+src/_click-status.ps1

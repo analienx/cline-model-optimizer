@@ -63,11 +63,71 @@ function Get-CmoEmptyUsageState {
         email = ''                  # email the current token belongs to
         balanceCents = $null        # account credit balance (paid credits)
         perModel = @{}              # core id -> { display, providerType, requests, totalTokens, creditsUsed, firstAtMs, lastAtMs }
+        perAccount = @{}            # email -> { fetchedAt, perModel } (rotation view: live + captured)
         autoAccounts = @{}          # '<email>'  -> epoch-ms when a pasted cap error was seen
         autoModels = @{}            # '<model>'  -> epoch-ms (secondary, from pasted errors)
         lastScanMs = 0              # transcript messages older than this are ignored
         lastScanAt = $null
         lastError = ''
+    }
+}
+
+function ConvertTo-CmoCounterBag {
+    # ONE model's counters -> OrderedDictionary (callers use .Contains/.Keys and
+    # property-style access; a JSON PSCustomObject has no .Keys).
+    param([object]$Entry)
+    $m = New-Object System.Collections.Specialized.OrderedDictionary
+    if ($null -eq $Entry) { return $m }
+    if ($Entry -is [System.Collections.IDictionary]) {
+        foreach ($k in @($Entry.Keys)) { if ("$k") { $m[[string]$k] = $Entry[$k] } }
+        return $m
+    }
+    foreach ($q in @($Entry.PSObject.Properties)) { if ($q.Name) { $m[$q.Name] = $q.Value } }
+    return $m
+}
+
+function ConvertTo-CmoPerModelBag {
+    # core id -> counters. MUST be a real dictionary: this is what the inferred-
+    # cap detector and the rotation planner walk, so a broken bag silently turns
+    # 'this account is used up' into 'no cap detected' (and rotation never fires).
+    param([object]$Bag)
+    $out = New-Object System.Collections.Specialized.OrderedDictionary
+    if ($null -eq $Bag) { return $out }
+    if ($Bag -is [System.Collections.IDictionary]) {
+        foreach ($k in @($Bag.Keys)) { if ("$k") { $out[[string]$k] = (ConvertTo-CmoCounterBag $Bag[$k]) } }
+        return $out
+    }
+    foreach ($p in @($Bag.PSObject.Properties)) {
+        if (-not $p.Name) { continue }
+        $out[$p.Name] = (ConvertTo-CmoCounterBag $p.Value)
+    }
+    return $out
+}
+
+function ConvertTo-CmoAccountBag {
+    # ONE account's usage entry -> { fetchedAt; perModel } with perModel as a REAL
+    # dictionary. THIS FUNCTION WAS REFERENCED BUT MISSING for a while, and the
+    # effect was brutal: loading any state that contained a perAccount entry threw
+    # CommandNotFoundException, Get-CmoUsageState swallowed it and returned an EMPTY
+    # state - so the whole account-rotation feature silently no-op'd forever.
+    # Keep it defined; tests/Test-CmoRotation.ps1 round-trips this exact path.
+    param([object]$Entry)
+    if ($null -eq $Entry) {
+        return [pscustomobject]@{ fetchedAt = $null; perModel = (New-Object System.Collections.Specialized.OrderedDictionary) }
+    }
+    $fa = $null; $pm = $null
+    if ($Entry -is [System.Collections.IDictionary]) {
+        if ($Entry.Contains('fetchedAt')) { $fa = $Entry['fetchedAt'] }
+        if ($Entry.Contains('perModel')) { $pm = $Entry['perModel'] }
+    } else {
+        foreach ($p in @($Entry.PSObject.Properties)) {
+            if ($p.Name -eq 'fetchedAt') { $fa = $p.Value }
+            elseif ($p.Name -eq 'perModel') { $pm = $p.Value }
+        }
+    }
+    return [pscustomobject]@{
+        fetchedAt = $fa
+        perModel = (ConvertTo-CmoPerModelBag -Bag $pm)
     }
 }
 
@@ -78,21 +138,20 @@ function ConvertTo-CmoBag {
     $out = New-Object System.Collections.Specialized.OrderedDictionary
     if ($null -eq $Bag) { return $out }
     if ($Bag -is [System.Collections.IDictionary]) {
-        foreach ($k in @($Bag.Keys)) { $out[$k] = $Bag[$k] }
+        foreach ($k in @($Bag.Keys)) {
+            if (-not "$k") { continue }
+            if ($Kind -eq 'perModel')        { $out[[string]$k] = (ConvertTo-CmoCounterBag $Bag[$k]) }
+            elseif ($Kind -eq 'perAccount')  { $out[[string]$k] = (ConvertTo-CmoAccountBag $Bag[$k]) }
+            else                             { $out[[string]$k] = $Bag[$k] }
+        }
         return $out
     }
     foreach ($p in @($Bag.PSObject.Properties)) {
         if (-not $p.Name) { continue }
         if ($Kind -eq 'perModel') {
-            # each model entry: normalize its counters too
-            $v = $p.Value
-            $m = New-Object System.Collections.Specialized.OrderedDictionary
-            if ($v) {
-                foreach ($q in @($v.PSObject.Properties)) {
-                    $m[$q.Name] = $q.Value
-                }
-            }
-            $out[$p.Name] = $m
+            $out[$p.Name] = (ConvertTo-CmoCounterBag $p.Value)
+        } elseif ($Kind -eq 'perAccount') {
+            $out[$p.Name] = (ConvertTo-CmoAccountBag $p.Value)
         } else {
             $out[$p.Name] = $p.Value
         }
@@ -112,6 +171,7 @@ function Get-CmoUsageState {
             email = [string]$j.email
             balanceCents = $j.balanceCents
             perModel = (ConvertTo-CmoBag -Bag $j.perModel -Kind 'perModel')
+            perAccount = (ConvertTo-CmoBag -Bag $j.perAccount -Kind 'perAccount')
             autoAccounts = (ConvertTo-CmoBag -Bag $j.autoAccounts -Kind 'plain')
             autoModels = (ConvertTo-CmoBag -Bag $j.autoModels -Kind 'plain')
             lastScanMs = [long]$j.lastScanMs
@@ -153,28 +213,21 @@ function Get-CmoClineAuth {
 }
 
 # ---- usage API ----
-function Invoke-CmoUsageApiFetch {
-    # live fetch: today's usage per model + the email/balance of the token's
-    # account. PAGINATION: '?limit=50' + '?cursor=' (verified live; the
-    # extension itself only reads page 1). Items are deduped by id - a wrong
-    # cursor param would otherwise count the same page repeatedly.
-    # Returns $null on failure (caller keeps the cache).
-    $auth = Get-CmoClineAuth
-    if (-not $auth) { return $null }
-    $hdr = @{ Authorization = ('Bearer ' + $auth.Token); 'Content-Type' = 'application/json' }
+function Invoke-CmoUsageForAuth {
+    # today's usage per model for ANY account (token from providers.json OR a
+    # captured login). PAGINATION: '?limit=50' + '?cursor=' (verified live; the
+    # extension itself only reads page 1). Items deduped by id.
+    param([string]$Token, [string]$AccountId, [string]$Email = '', [switch]$WithBalance)
+    if (-not $Token -or -not $AccountId) { return $null }
+    $hdr = @{ Authorization = ('Bearer ' + $Token); 'Content-Type' = 'application/json' }
     $base = 'https://api.cline.bot/api/v1'
 
-    $email = $auth.Email
-    try {
-        $me = Invoke-RestMethod -Uri ($base + '/users/me') -Headers $hdr -Method Get -TimeoutSec 15
-        if ($me.data -and $me.data.email) { $email = [string]$me.data.email }
-    } catch { }
-
-    $balanceCents = $null
-    try {
-        $b = Invoke-RestMethod -Uri ($base + '/users/' + $auth.AccountId + '/balance') -Headers $hdr -Method Get -TimeoutSec 15
-        if ($b.data) { $balanceCents = [long]$b.data.balance }
-    } catch { }
+    if (-not $Email) {
+        try {
+            $me = Invoke-RestMethod -Uri ($base + '/users/me') -Headers $hdr -Method Get -TimeoutSec 15
+            if ($me.data -and $me.data.email) { $Email = [string]$me.data.email }
+        } catch { }
+    }
 
     $dayStart = (Get-Date).Date
     $perModel = @{}
@@ -185,7 +238,7 @@ function Invoke-CmoUsageApiFetch {
         $pages++
         $u = $null
         try {
-            $uri = $base + '/users/' + $auth.AccountId + '/usages?limit=50'
+            $uri = $base + '/users/' + $AccountId + '/usages?limit=50'
             if ($cursor) { $uri = $uri + '&cursor=' + [uri]::EscapeDataString($cursor) }
             $u = Invoke-RestMethod -Uri $uri -Headers $hdr -Method Get -TimeoutSec 20
         } catch { return $null }
@@ -233,7 +286,21 @@ function Invoke-CmoUsageApiFetch {
         if ($fresh -eq 0) { break }
         if ($items.Count -eq 0) { break }
     }
-    return @{ Email = $email; BalanceCents = $balanceCents; PerModel = $perModel }
+    $balanceCents = $null
+    if ($WithBalance) {
+        try {
+            $b = Invoke-RestMethod -Uri ($base + '/users/' + $AccountId + '/balance') -Headers $hdr -Method Get -TimeoutSec 15
+            if ($b.data) { $balanceCents = [long]$b.data.balance }
+        } catch { }
+    }
+    return @{ Email = $Email; BalanceCents = $balanceCents; PerModel = $perModel }
+}
+
+function Invoke-CmoUsageApiFetch {
+    # live (signed-in) account fetch - thin wrapper over Invoke-CmoUsageForAuth
+    $auth = Get-CmoClineAuth
+    if (-not $auth) { return $null }
+    return Invoke-CmoUsageForAuth -Token $auth.Token -AccountId $auth.AccountId -Email $auth.Email -WithBalance
 }
 # ---- transcript cap-hit scan ----
 function ConvertTo-CmoTextBlocksText {
@@ -471,4 +538,75 @@ function Get-CmoUsageSummaryLine {
     if ($st.lastError) { $parts += ('err: ' + [string]$st.lastError) }
     if ($parts.Count -eq 0) { return 'usage API: no data yet' }
     return ('usage API: ' + ($parts -join '  ·  '))
+}
+
+# ---- per-account usage (rotation data layer) ----
+function Update-CmoAccountUsages {
+    # refresh cached usage for every CAPTURED account (5-min TTL each). The live
+    # account's usage lives in the top-level perModel bag; every account (live
+    # included) also gets an entry under perAccount so the rotation planner sees
+    # one uniform map of who-is-depleted-for-what.
+    $st = Get-CmoUsageState
+    if (-not $st.perAccount) {
+        $st | Add-Member -NotePropertyName perAccount -NotePropertyValue (New-Object System.Collections.Specialized.OrderedDictionary) -Force
+    }
+    $nowMs = [long](([DateTimeOffset]::Now).ToUnixTimeMilliseconds())
+    $nowIso = (Get-Date).ToString('o')
+
+    # mirror the live account
+    if ($st.email) {
+        $bag = New-Object System.Collections.Specialized.OrderedDictionary
+        foreach ($k in @($st.perModel.Keys)) { $bag[$k] = $st.perModel[$k] }
+        $st.perAccount[$st.email] = @{ fetchedAt = $st.fetchedAt; perModel = $bag }
+    }
+
+    foreach ($c in @(Get-CmoCapturedAccounts)) {
+        if ($c.Email -eq $st.email) { continue }
+        if ($c.Expired) { continue }
+        $fresh = $false
+        try {
+            if ($st.perAccount.Contains($c.Email)) {
+                $prev = $st.perAccount[$c.Email]
+                $fa = 0
+                try { $fa = [long](([DateTimeOffset]::Parse(([string]$prev.fetchedAt))).ToUnixTimeMilliseconds()) } catch { }
+                if (($nowMs - $fa) -lt 300000) { $fresh = $true }   # 5 min TTL
+            }
+        } catch { }
+        if ($fresh) { continue }
+        $cred = Get-CmoCredentialsFor -Email $c.Email
+        if (-not $cred -or -not $cred.Token) { continue }
+        $r = Invoke-CmoUsageForAuth -Token $cred.Token -AccountId $cred.AccountId -Email $c.Email
+        if ($r) {
+            $st.perAccount[$c.Email] = @{ fetchedAt = $nowIso; perModel = $r.PerModel }
+        }
+    }
+    Save-CmoUsageState -State $st | Out-Null
+    return $st
+}
+
+function Get-CmoAccountModelCaps {
+    # email -> { core -> lastAtMs } of inferred-capped free models, for every
+    # account we have usage data for (live + captured).
+    $st = Get-CmoUsageState
+    $out = New-Object System.Collections.Specialized.OrderedDictionary
+    try {
+        if (-not $st.perAccount) { return $out }
+        foreach ($e in @($st.perAccount.Keys)) {
+            $pa = $st.perAccount[$e]
+            $shim = [pscustomobject]@{ perModel = $pa.perModel }
+            $out[$e] = Get-CmoInferredCaps -State $shim
+        }
+    } catch { }
+    return $out
+}
+
+function Get-CmoRotationContext {
+    # one call for planners + UI: caps per account, live email, captured tokens
+    $st = Get-CmoUsageState
+    return [pscustomobject]@{
+        Caps = (Get-CmoAccountModelCaps)
+        LiveEmail = [string]$st.email
+        Captured = @(Get-CmoCapturedAccounts)
+        State = $st
+    }
 }

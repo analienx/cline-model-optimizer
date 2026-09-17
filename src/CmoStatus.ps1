@@ -41,6 +41,19 @@ function New-Pill([string]$text, [string]$color) {
     return $bd
 }
 
+function Get-CmoRouteLabel([string]$model, [string]$tier) {
+    $name = $model -replace '^(cline-free|cline-pass|z-ai)/', ''
+    $name = switch -Regex ($name) {
+        '^glm-5\.3-flash$' { 'GLM-5.3 Flash'; break }
+        '^muse-spark-1\.3-contributor$' { 'Muse Spark 1.3'; break }
+        '^deepseek-v4\.1-flash$' { 'DeepSeek V4.1 Flash'; break }
+        '^deepseek-v4-flash$' { 'DeepSeek V4 Flash'; break }
+        default { $name }
+    }
+    $route = if ($tier -eq 'FREE') { 'FREE' } elseif ($tier -eq 'SUBSCRIPTION') { 'CLINE PASS' } else { $tier }
+    return [pscustomobject]@{ Name = $name; Route = $route }
+}
+
 function New-TinyButton([string]$text, [scriptblock]$onClick, [string]$color = '') {
     if (-not $color) { $color = $teal }
     $b = New-Object System.Windows.Controls.Button -Property @{
@@ -126,6 +139,26 @@ $root = New-Object System.Windows.Controls.StackPanel
 $scroll.Content = $root
 $w.Content = $scroll
 
+function Resize-ToContent {
+    # TOP-UX: the window used to be pinned at 780px, so the rotation chain +
+    # ladder pushed real content (ladder #5, the add-model combo) BELOW THE FOLD.
+    # Size the window to what it actually has to show instead: grow up to the
+    # working area, never shrink below the default, keep the scroll bar only as a
+    # fallback for very small screens.
+    try {
+        if (-not $w.IsLoaded) { return }
+        $root.UpdateLayout()
+        $need = [double]$root.DesiredSize.Height
+        if ($need -le 0) { return }
+        $work = [System.Windows.SystemParameters]::WorkArea
+        $maxH = [Math]::Max($w.MinHeight, ([double]$work.Height - 24))
+        $h = [Math]::Min([Math]::Max(($need + 46), 780), $maxH)   # 46 = title bar + borders
+        if ([Math]::Abs($h - $w.Height) -gt 2) { $w.Height = $h }
+    } catch { }
+}
+    # grows after the first render, and again whenever Refresh changes content
+$w.Add_ContentRendered({ Resize-ToContent })
+
 # ---------- child-process actions (headless; never flash a console) ----------
 function Invoke-CmoScript([string]$Name, [string[]]$Extra = @()) {
     $p = Join-Path $PSScriptRoot $Name
@@ -184,8 +217,13 @@ $updatedLine.Margin = '0,0,0,10'
 [void]$root.Children.Add($updatedLine)
 
 # ---------- layout: accounts full width, then ladder | active+recent+system ----------
-$acctCard = New-Card 'ACCOUNTS - free budget left today' '...'
+$acctCard = New-Card 'ACCOUNTS - free budget left today' 'loading...'
 [void]$root.Children.Add($acctCard.Card)
+
+# the user's rule on screen: same model across accounts first, next model only
+# when every account is out of free tier for it. Full width, above the fold.
+$rotCard = New-Card 'ROTATION - same model across accounts first' 'loading...'
+[void]$root.Children.Add($rotCard.Card)
 
 $cols = New-RowGrid @('*', '384')
 $cols.Margin = '0,0,0,0'
@@ -197,7 +235,7 @@ $rightCol = New-Object System.Windows.Controls.StackPanel
 $rightCol.Margin = '10,0,0,0'
 [void]$root.Children.Add($cols)
 
-$ladderCard = New-Card 'PREFERRED LADDER - free models first' '...'
+$ladderCard = New-Card 'PREFERRED LADDER - free models first' 'loading...'
 $activeCard = New-Card 'WHAT CLINE IS USING'
 $recentCard = New-Card 'RECENT ACTIVITY'
 $systemCard = New-Card 'SYSTEM'
@@ -208,6 +246,238 @@ $systemCard = New-Card 'SYSTEM'
 
 
 # ---------- ACCOUNTS ----------
+
+# ---------- UNLOCK (amber accounts: one sign-in captures their token) ----------
+# 'not unlocked' = a tracked account Cline has never signed in with on this
+# machine, so no auth token is captured and rotation cannot use its budget.
+# Full auto-unlock is impossible BY DESIGN: the token only comes into existence
+# through the real OAuth sign-in (no passwords are ever stored here). What this
+# flow automates is everything AROUND that sign-in: puts the email on the
+# clipboard, detects the new login live, captures + encrypts it, and confirms.
+$script:unlockTimer = $null
+$script:unlockTicks = 0
+$script:unlockTarget = ''
+$script:unlockStrip = $null   # the strip StackPanel whose content the flow rewrites
+
+function Stop-CmoUnlockWatch {
+    if ($script:unlockTimer) { try { $script:unlockTimer.Stop() } catch { }; $script:unlockTimer = $null }
+}
+
+function Start-CmoUnlock([string]$Email) {
+    if (-not $Email) { return }
+    $sp = $script:unlockStrip
+    if (-not $sp) { return }
+    Stop-CmoUnlockWatch
+    try { Set-Clipboard -Value $Email } catch { }
+    $script:unlockTarget = $Email
+    $script:unlockTicks = 0
+    $sp.Children.Clear()
+    $dot = New-Object System.Windows.Shapes.Ellipse -Property @{ Width = 9; Height = 9; VerticalAlignment = 'Center'; Margin = '0,0,6,0' }
+    $dot.Fill = (& $brush $amber)
+    [void]$sp.Children.Add($dot)
+    $txt = New-Text ('waiting for sign-in as ' + $Email + '  -  the address is on your clipboard. In VS Code: Cline panel, account icon, sign out, then sign in with it. Capture happens the moment Cline stores the login.') 11 $fg
+    [void]$sp.Children.Add($txt)
+    [void]$sp.Children.Add((New-TinyButton 'cancel' { Stop-CmoUnlockWatch; Invoke-Refresh } $dim))
+
+    $t = New-Object System.Windows.Threading.DispatcherTimer
+    $t.Interval = [TimeSpan]::FromSeconds(2)
+    $t.Add_Tick({ Invoke-CmoUnlockTick })
+    $script:unlockTimer = $t
+    $t.Start()
+}
+
+function Invoke-CmoUnlockTick {
+    $target = [string]$script:unlockTarget
+    if (-not $target) { Stop-CmoUnlockWatch; return }
+    $script:unlockTicks++
+    if ($script:unlockTicks -gt 90) {   # 3 min without a captured login
+        Stop-CmoUnlockWatch
+        $sp = $script:unlockStrip
+        if ($sp) {
+            $sp.Children.Clear()
+            [void]$sp.Children.Add((New-Text 'nothing captured yet - finish the sign-in in Cline (Cline stores ONE login, so sign out first), then retry.' 11 $amber))
+            $em2 = $target
+            [void]$sp.Children.Add((New-TinyButton 'retry' ({ Start-CmoUnlock -Email $em2 }).GetNewClosure() $amber))
+        }
+        return
+    }
+    try {
+        # cheap local reads first: only run the capture path when providers.json
+        # holds a login the store does not know yet (or knows staler) - that is
+        # the ONLY case with a network call inside Update-CmoCapturedCredentials.
+        $a = Get-CmoProvidersAuth
+        $need = $false
+        if ($a -and [string]$a.accountId) {
+            $need = $true
+            foreach ($c in @(Get-CmoCapturedAccounts)) {
+                if ([string]$c.AccountId -eq [string]$a.accountId) {
+                    $need = ([long]$c.ExpiresAtMs -lt [long]$a.expiresAt)
+                    break
+                }
+            }
+        }
+        if ($need) { Update-CmoCapturedCredentials | Out-Null }
+        $cap = @(Get-CmoCapturedAccounts | Where-Object { ([string]$_.Email) -eq $target -and -not $_.Expired })
+        if ($cap.Count -gt 0) {
+            # success - confirm in place, then refresh so the account leaves
+            # 'signin' (it shows grey 'not measured' until the guardian has
+            # fetched its budget; rotation can switch to it from then on).
+            Stop-CmoUnlockWatch
+            $sp = $script:unlockStrip
+            if ($sp) {
+                $sp.Children.Clear()
+                $gdot = New-Object System.Windows.Shapes.Ellipse -Property @{ Width = 9; Height = 9; VerticalAlignment = 'Center'; Margin = '0,0,6,0' }
+                $gdot.Fill = (& $brush $green)
+                [void]$sp.Children.Add($gdot)
+                [void]$sp.Children.Add((New-Text ('unlocked: ' + $target + ' is in the rotation now - the guardian measures its free budget shortly.') 11 $green))
+            }
+            Invoke-Refresh
+            return
+        }
+    } catch { }
+}
+
+# ---------- ROTATION (the user's rule, drawn literally) ----------
+function Render-Rotation([object]$snap) {
+    Clear-Body $rotCard
+    foreach ($c in @($rotCard.Actions.Children)) { $rotCard.Actions.Children.Remove($c) }
+
+    # model-major: every account for model #1 (live first), then model #2...
+    # states: ready (green) / capped (red) / signin (amber, unlocks token) / unknown (grey)
+    $q = $null
+    try {
+        $rot = Get-CmoRotationContext
+        $q = Get-CmoRotationQueue -Routing $script:routing -Act $snap.Act `
+            -UsageState $rot.State -AccountCaps $rot.Caps -LiveEmail $rot.LiveEmail
+    } catch { }
+    if (-not $q -or @($q.Models).Count -eq 0) {
+        $rotCard.Sub.Text = 'no preferred free models yet'
+        return
+    }
+
+    $hereTxt = ''
+    if ($q.Here) { $hereTxt = ('now: {0} @ {1}' -f [string]$q.Here.Model, [string]$q.Here.Account) }
+    elseif ($q.CurrentIsSubscription) {
+        # paying right now: say so, and point at the free rung that replaces it
+        $hereTxt = ('now: ' + [string]$q.CurrentModel + ' [SUBSCRIPTION]')
+    }
+    $nextTxt = ''
+    if ($q.Next) {
+        $nextTxt = ('next: {0} @ {1}' -f [string]$q.Next.Model, [string]$q.Next.Account)
+        if ($q.Next.Account -ne $q.LiveEmail) { $nextTxt += '  (sign in to rotate)' }
+    } elseif ($q.Here) {
+        $nextTxt = 'rotation complete - nothing left today'
+    }
+    $rotCard.Sub.Text = (($hereTxt + '    ' + $nextTxt).Trim())
+
+    # the RULE, spelled out with the real ladder: model #1 runs on every account
+    # before model #2 is touched, ... and subscription is the tail. This is the
+    # sentence the user asked to see, so it is drawn rather than implied.
+    $seqParts = @()
+    foreach ($m in $q.Models) { $seqParts += (([string]$m.Model) -replace '^cline-free/', '') }
+    foreach ($s in $q.Subscription) { $seqParts += ((([string]$s.Model) -replace '^cline-pass/', '') + ' (sub)') }
+    if ($seqParts.Count -gt 1) {
+        $seqTxt = New-Text ('order: ' + ($seqParts -join '  ->  ') + '    each model runs on every account before the next') 10 $dim
+        $seqTxt.Margin = '2,3,0,0'
+        $seqTxt.TextWrapping = 'Wrap'
+        [void]$rotCard.Body.Children.Add($seqTxt)
+    }
+
+    foreach ($m in $q.Models) {
+        $row = New-RowSurface
+        $g = New-RowGrid @('28', '*')
+        $rkT = New-Text ([string]$m.Rank) 15 (& $tierColor $m.Tier) 'Bold'
+        [void]$g.Children.Add($rkT)
+
+        $mid = New-Object System.Windows.Controls.StackPanel -Property @{ VerticalAlignment = 'Center' }
+        $l1 = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal' }
+        $routeLabel = Get-CmoRouteLabel ([string]$m.Model) ([string]$m.Tier)
+        [void]$l1.Children.Add((New-Text ([string]$routeLabel.Name) 13 $fg 'SemiBold'))
+        [void]$l1.Children.Add((New-Pill ('FREE FALLBACK #' + [string]$m.Rank) $green))
+        if ($m.Current) { [void]$l1.Children.Add((New-Pill 'IN USE' $green)) }
+        if (@($m.Ready).Count -eq 0 -and @($m.Capped).Count -gt 0) {
+            # honesty: 'everywhere' only when no account is left unmeasured. If some
+            # accounts are merely not unlocked yet, say so - and how many - because a
+            # single sign-in could still keep this model alive on another account.
+            $locked = @($m.Accounts | Where-Object { [string]$_.State -eq 'signin' }).Count
+            $pillTxt = 'used up everywhere today'
+            if ($locked -gt 0) {
+                $pillTxt = ('used up here - ' + $locked + $(if ($locked -eq 1) { ' account' } else { ' accounts' }) + ' not unlocked')
+            }
+            [void]$l1.Children.Add((New-Pill $pillTxt $red))
+        }
+        [void]$mid.Children.Add($l1)
+
+        # Explicit account tiles. The previous display encoded state almost entirely
+        # as a 9px coloured dot, and authenticated non-live accounts still looked
+        # grey. Text labels make every state unambiguous and WrapPanel prevents long
+        # email addresses from being clipped.
+        $strip = New-Object System.Windows.Controls.WrapPanel -Property @{ Margin = '0,5,0,0' }
+        foreach ($a in $m.Accounts) {
+            $stCol = $green; $tileBg = '#12392F'
+            if ([string]$a.State -eq 'capped') { $stCol = $red; $tileBg = '#3B1F2B' }
+            elseif ([string]$a.State -eq 'signin') { $stCol = $amber; $tileBg = '#3A3016' }
+            elseif ([string]$a.State -eq 'unknown') { $stCol = $dim; $tileBg = '#273042' }
+
+            $tile = New-Object System.Windows.Controls.Border -Property @{
+                Width = 270; MinHeight = 53; Margin = '0,0,7,6'; Padding = '8,5'
+                CornerRadius = '6'; Background = (& $brush $tileBg)
+                BorderBrush = (& $brush $stCol); BorderThickness = '1' }
+            $tile.ToolTip = ([string]$a.Reason)
+            $tileBody = New-Object System.Windows.Controls.StackPanel
+            $tileTop = New-RowGrid @('*', 'Auto')
+            $emailText = New-Text ([string]$a.Email) 10.5 $fg 'SemiBold'
+            [void]$tileTop.Children.Add($emailText)
+            $statePill = New-Pill ([string]$a.StateLabel) $stCol
+            [void]$tileTop.Children.Add($statePill)
+            [System.Windows.Controls.Grid]::SetColumn($statePill, 1)
+            [void]$tileBody.Children.Add($tileTop)
+            $meta = $(if ($a.Live) { 'ACTIVE LOGIN' } elseif ($a.Captured) { 'AUTH READY' } elseif ($a.Expired) { 'SAVED TOKEN EXPIRED' } else { 'AUTH REQUIRED' })
+            if ($null -ne $a.AgeMinutes) { $meta += ('  ·  checked ' + [int]$a.AgeMinutes + 'm ago') }
+            [void]$tileBody.Children.Add((New-Text $meta 9.5 $stCol 'Bold'))
+            $tile.Child = $tileBody
+            [void]$strip.Children.Add($tile)
+        }
+        [void]$mid.Children.Add($strip)
+        [void]$g.Children.Add($mid)
+        [System.Windows.Controls.Grid]::SetColumn($mid, 1)
+        $row.Child = $g
+        [void]$rotCard.Body.Children.Add($row)
+    }
+
+    # amber accounts get an in-place unlock strip (no modal dialog): one click
+    # starts the guided capture for that login (clipboard + live detection).
+    $unlockEmails = @(@($q.Signin) | ForEach-Object { [string]$_.Account } | Select-Object -Unique)
+    if ($unlockEmails.Count -gt 0) {
+        $row = New-RowSurface
+        $g = New-RowGrid @('18', '*')
+        $dot = New-Object System.Windows.Shapes.Ellipse -Property @{ Width = 9; Height = 9; VerticalAlignment = 'Center'; Margin = '0,0,6,0' }
+        $dot.Fill = (& $brush $amber)
+        $dot.ToolTip = 'tracked but never signed in on this machine: no token captured, so rotation cannot use its budget'
+        [void]$g.Children.Add($dot)
+        $mid = New-Object System.Windows.Controls.StackPanel -Property @{ VerticalAlignment = 'Center' }
+        [void]$mid.Children.Add((New-Text ('not unlocked yet - one sign-in in Cline unlocks each:') 11 $fg))
+        $sp = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal'; VerticalAlignment = 'Center'; Margin = '0,3,0,0' }
+        $script:unlockStrip = $sp
+        foreach ($em in $unlockEmails) {
+            $e2 = $em
+            $b = New-TinyButton ('unlock ' + $e2) ({ Start-CmoUnlock -Email $e2 }).GetNewClosure() $amber
+            $b.ToolTip = ('sign in as ' + $e2 + ' once in Cline; the token is captured automatically and the account joins the rotation')
+            [void]$sp.Children.Add($b)
+        }
+        [void]$mid.Children.Add($sp)
+        [void]$g.Children.Add($mid)
+        [System.Windows.Controls.Grid]::SetColumn($mid, 1)
+        $row.Child = $g
+        [void]$rotCard.Body.Children.Add($row)
+    }
+
+    $lg = New-Text ('AVAILABLE = authenticated and not depleted   ·   DEPLETED = free tier used today   ·   NOT CHECKED = authenticated but awaiting usage refresh') 10 $dim
+    $lg.Margin = '2,4,0,0'
+    $lg.TextWrapping = 'Wrap'
+    [void]$rotCard.Body.Children.Add($lg)
+}
+
 function Render-Accounts {
     Clear-Body $acctCard
     foreach ($c in @($acctCard.Actions.Children)) { $acctCard.Actions.Children.Remove($c) }
@@ -217,8 +487,8 @@ function Render-Accounts {
     $counts = Get-CmoAccountCounts -Accounts $rows
 
     $tally = ($counts.Green.ToString() + ' green')
-    if ($counts.Amber -gt 0) { $tally += (' · ' + $counts.Amber + ' near limit') }
-    if ($counts.Red -gt 0) { $tally += (' · ' + $counts.Red + ' used up today') }
+    if ($counts.Amber -gt 0) { $tally += (' · ' + $counts.Amber + ' partly used up') }
+    if ($counts.Red -gt 0) { $tally += (' · ' + $counts.Red + ' nothing free left') }
     if ($counts.SignedIn -eq 0) { $tally = 'no accounts tracked yet' }
     # one compact hint line: tally + reset time. Nothing else - the rows say the rest.
     $acctCard.Sub.Text = ($tally + '   ·   resets in ' + (Get-CmoDailyResetText))
@@ -308,8 +578,17 @@ function New-AccountRow([object]$r) {
     $emailT = New-Text $r.Email 13 $fg 'SemiBold'
     $emailT.Margin = '0,0,7,0'
     [void]$nameStack.Children.Add($emailT)
-    if ($r.Sources -contains 'cline-file') { [void]$nameStack.Children.Add((New-Pill 'cline login' $teal)) }
-    else { [void]$nameStack.Children.Add((New-Pill 'tracked' $dim)) }
+    $savedAuth = @()
+    try { $savedAuth = @(Get-CmoCapturedAccounts | Where-Object { ([string]$_.Email) -eq ([string]$r.Email) } | Select-Object -First 1) } catch { }
+    if ($r.Sources -contains 'cline-file') {
+        [void]$nameStack.Children.Add((New-Pill 'ACTIVE LOGIN' $teal))
+    } elseif ($savedAuth.Count -gt 0 -and -not $savedAuth[0].Expired) {
+        [void]$nameStack.Children.Add((New-Pill 'AUTH READY' $green))
+    } elseif ($savedAuth.Count -gt 0 -and $savedAuth[0].Expired) {
+        [void]$nameStack.Children.Add((New-Pill 'TOKEN EXPIRED' $amber))
+    } else {
+        [void]$nameStack.Children.Add((New-Pill 'NOT AUTHENTICATED' $dim))
+    }
     if ($r.Quota -eq 'LIVE') { [void]$nameStack.Children.Add((New-Pill 'LIVE' $green)) }
     if ($r.DepletedToday) { [void]$nameStack.Children.Add((New-Pill 'USED UP' $red)) }
     if ($r.AutoDepletedMs) { [void]$nameStack.Children.Add((New-Pill 'CAP HIT' $red)) }
@@ -439,8 +718,12 @@ function Render-Ladder {
         [void]$g.Children.Add($rankT)
         $mid = New-Object System.Windows.Controls.StackPanel -Property @{ VerticalAlignment = 'Center' }
         $line1 = New-Object System.Windows.Controls.StackPanel -Property @{ Orientation = 'Horizontal' }
-        [void]$line1.Children.Add((New-Text ([string]$s.model) 13.5 $fg 'SemiBold'))
-        [void]$line1.Children.Add((New-Pill ([string]$s.tier) (& $tierColor $s.tier)))
+        $routeLabel = Get-CmoRouteLabel ([string]$s.model) ([string]$s.tier)
+        [void]$line1.Children.Add((New-Text ([string]$routeLabel.Name) 13.5 $fg 'SemiBold'))
+        [void]$line1.Children.Add((New-Pill ([string]$routeLabel.Route) (& $tierColor $s.tier)))
+        if ([string]$s.model -eq 'z-ai/glm-5.3-flash') {
+            [void]$line1.Children.Add((New-Pill 'FIRST FALLBACK AFTER MUSE' $green))
+        }
         if ($s.thinking -and $s.thinking -ne 'off') { [void]$line1.Children.Add((New-Pill ('think:' + $s.thinking) $dim)) }
         # UX audit fix: no PINNED pill - every preferred row would carry it (pure
         # noise); the ▲▼✕ buttons already mark pinned rows.
@@ -609,13 +892,52 @@ function Render-System([object]$snap) {
 # UX audit fix: 'Use #1' blindly applied the TOP of the ladder even when that
 # model is capped. This button applies the CAP-AWARE plan target instead.
 [void]$headActs.Children.Add((New-TinyButton 'Apply next' {
-        $p = Get-CmoAutoSwitchPlan -Routing $script:routing -Act (Get-CmoSnapshot -Routing $script:routing).Act -UsageState (Get-CmoUsageState)
-        if ($p) { Start-CmoApply -Rank ([int]$p.Rank) } else { Start-CmoApply -Rank 1 }
+        $rot1 = Get-CmoRotationContext
+        $s1 = Get-CmoSnapshot -Routing $script:routing
+        $p = Get-CmoAutoSwitchPlan -Routing $script:routing -Act $s1.Act `
+            -UsageState $rot1.State -AccountCaps $rot1.Caps -LiveEmail $rot1.LiveEmail
+        if (-not $p) {
+            [System.Windows.MessageBox]::Show('No switch is currently needed.', 'Apply next', 'OK', 'Information') | Out-Null
+            return
+        }
+        $kind = [string]$p.Kind
+        if ($kind -eq 'needs-signin' -and $p.Account) {
+            Start-CmoUnlock -Email ([string]$p.Account)
+            return
+        }
+        if (($kind -eq 'account-switch' -or $kind -eq 'both') -and $p.Account) {
+            $sw = Invoke-CmoScript 'CmoSwitchAccount.ps1' @('-Email', [string]$p.Account)
+            $msg = (($sw.Output + "`n" + $sw.Error).Trim())
+            if ($sw.ExitCode -ne 0) {
+                if (-not $msg) { $msg = 'account switch failed' }
+                [System.Windows.MessageBox]::Show($msg, 'Switch account', 'OK', 'Warning') | Out-Null
+                return
+            }
+            if ($kind -eq 'both') {
+                Start-CmoApply -Rank ([int]$p.Rank)
+            } else {
+                if (-not $msg) { $msg = 'account switched' }
+                [System.Windows.MessageBox]::Show($msg, 'Switch account (model kept)', 'OK', 'Information') | Out-Null
+            }
+            return
+        }
+        if ($kind -eq 'model-switch') {
+            Start-CmoApply -Rank ([int]$p.Rank)
+            return
+        }
+        [System.Windows.MessageBox]::Show(('Unsupported switch plan: ' + $kind), 'Apply next', 'OK', 'Warning') | Out-Null
     } $green))
 
 function Invoke-Refresh {
+    # a refresh also captures the login Cline currently holds, so a just-finished
+    # sign-in is picked up without waiting for the next guardian cycle (the
+    # network call inside only happens for a genuinely NEW login). A running
+    # unlock watch is abandoned here - the re-render rebuilds the strip anyway.
+    if ($script:unlockTimer) { Stop-CmoUnlockWatch }
+    try { Update-CmoCapturedCredentials | Out-Null } catch { }
     $snap = Get-CmoSnapshot -Routing $script:routing
     Render-Accounts
+    Render-Rotation $snap
     Render-Ladder
     Render-Active $snap
     Render-Recent $snap
@@ -647,17 +969,29 @@ function Invoke-Refresh {
         }
         $vTip = [string]$snap.Act.Recommendation.Message
     }
-    # the action line: cap-aware switch plan, visible WITHOUT scrolling
+    # the action line: rotation-aware switch plan, visible WITHOUT scrolling.
+    # The plan already knows model-major order (same model, next account first).
     $plan = $null
-    try { $plan = Get-CmoAutoSwitchPlan -Routing $script:routing -Act $snap.Act -UsageState (Get-CmoUsageState) } catch { }
+    try {
+        $rot0 = Get-CmoRotationContext
+        $plan = Get-CmoAutoSwitchPlan -Routing $script:routing -Act $snap.Act `
+            -UsageState $rot0.State -AccountCaps $rot0.Caps -LiveEmail $rot0.LiveEmail
+    } catch { }
     if ($plan) {
         $vCol = $amber
         $reason = switch ([string]$plan.Reason) {
-            'cap'             { 'free tier used up' }
-            'all-free-capped' { 'all free used up today' }
-            default           { 'free model available' }
+            'account-rotation' { 'free used up here - same model, other account' }
+            'next-model'       { 'model used up on all accounts - next model' }
+            'unknown-budget'   { 'one sign-in may unlock free budget' }
+            'all-free-capped'  { 'all free used up today' }
+            'free-available'   { 'free model available' }
+            default            { [string]$plan.Reason }
         }
-        $v = ($v + '   ->   next: ' + $plan.To + ' (' + $reason + '; auto-applies when VS Code closes, or Apply next)')
+        $tgt = [string]$plan.To
+        if ([string]$plan.Kind -in @('account-switch', 'needs-signin', 'both') -and $plan.Account) {
+            $tgt += (' @ ' + [string]$plan.Account)
+        }
+        $v = ($v + '   ->   next: ' + $tgt + ' (' + $reason + '; auto-applies when VS Code closes, or Apply next)')
     } elseif ($snap.StateExists -and $snap.Act -and ([string]$snap.Act.Tier) -eq 'FREE') {
         # no plan + free in use: either the best AVAILABLE free (green) or capped
         # with nothing left today (the ladder's #1 being capped is not your fault)
@@ -685,6 +1019,7 @@ function Invoke-Refresh {
     $gWhen = 'never'
     if (Test-Path -LiteralPath $gLog) { $gWhen = (Get-Item $gLog).LastWriteTime.ToString('HH:mm') }
     $updatedLine.Text = ('updated ' + (Get-Date -Format 'HH:mm') + '   ·   guardian ran ' + $gWhen)
+    Resize-ToContent   # rotation chain can grow/shrink between refreshes
 }
 
 Invoke-Refresh

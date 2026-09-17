@@ -246,15 +246,39 @@ function Get-CmoAccountSummary {
         # inferred cap: the usage feed shows a free model that stopped while work
         # continued (Cline's cap error itself is UI-only and never hits disk).
         # Only the token owner (LIVE account) has usage data.
+        # IMPORTANT: Cline's free tier is PER MODEL, so one capped free model must
+        # NOT paint the whole account red - that contradicted the ROTATION card,
+        # which still offered a free model on this very account. The account lamp
+        # answers 'has this account got any free model left?':
+        #   every pinned free model capped -> RED   (nothing left here)
+        #   some capped, some left         -> AMBER (partly used up)
         if ($g.Health -ne 'RED') {
             $uSt = Get-CmoUsageState
             if ($uSt.email -and (([string]$uSt.email).ToLowerInvariant() -eq ([string]$g.Email).ToLowerInvariant())) {
                 $caps = Get-CmoInferredCaps -State $uSt
                 if ($caps.Count -gt 0) {
-                    $g.Health = 'RED'
+                    $pinned = @()
+                    try { $pinned = @($(Get-CmoRoutingConfig).freeSelection.preferredFreeModels | Where-Object { $_ }) } catch { }
+                    $total = $pinned.Count
+                    $cappedN = 0
+                    foreach ($p in $pinned) {
+                        $pc = Get-CmoModelCoreId -Id ([string]$p)
+                        if ($pc -and $caps.Contains($pc)) { $cappedN++ }
+                    }
                     $capKeys = @($caps.Keys)
                     $last = [long]$caps[$capKeys[0]]
-                    $g.HealthLabel = ('free cap hit (inferred: free usage stopped ' + (ConvertTo-CmoEpochLocal -Ms $last).ToString('HH:mm') + ')')
+                    $when = (ConvertTo-CmoEpochLocal -Ms $last).ToString('HH:mm')
+                    if ($total -gt 0 -and $cappedN -ge $total) {
+                        $g.Health = 'RED'
+                        $g.HealthLabel = ('all ' + $total + ' free models used up today (last stopped ' + $when + ')')
+                    } else {
+                        $g.Health = 'AMBER'
+                        if ($total -gt 0) {
+                            $g.HealthLabel = ('' + $cappedN + ' of ' + $total + ' free models used up today (' + $when + ')')
+                        } else {
+                            $g.HealthLabel = ('some free models used up today (' + $when + ')')
+                        }
+                    }
                 }
             }
         }
