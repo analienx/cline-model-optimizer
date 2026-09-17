@@ -89,9 +89,9 @@ This repo is the **sole routing-policy owner** for Agent Foundry v3
 see [`docs/ROUTING-OWNERSHIP.md`](docs/ROUTING-OWNERSHIP.md)).
 
 Canonical free order (model-major across Pi accounts 1,2,3):
-**Muse Spark 1.3 free** (`cline-free/muse-spark-1.3-contributor`) x pi-1,2,3,
-then **GLM-5.3 Flash free** (`z-ai/glm-5.3-flash`) x pi-1,2,3,
-then **DeepSeek V4.1 Flash free** (`cline-free/deepseek-v4.1-flash`) x pi-1,2,3,
+**Muse Spark 1.3 free** (`cline-free/muse-spark-1.3-contributor`) x account-1,2,3,
+then **GLM-5.3 Flash free** (`z-ai/glm-5.3-flash`) x account-1,2,3,
+then **DeepSeek V4.1 Flash free** (`cline-free/deepseek-v4.1-flash`) x account-1,2,3,
 then **Cline Pass subscription only** - never pay-as-you-go.
 
 Machine-readable policy: [`src/foundry-route-policy.json`](src/foundry-route-policy.json)
@@ -99,7 +99,7 @@ Machine-readable policy: [`src/foundry-route-policy.json`](src/foundry-route-pol
 [`src/CmoFoundryRoute.ps1`](src/CmoFoundryRoute.ps1)).
 
 Capability precision: **Pi launchers may rotate isolated account profiles**
-(pi-1/pi-2/pi-3), while **the Cline VS Code extension exposes only the active
+(account-1/account-2/account-3), while **the Cline VS Code extension exposes only the active
 login** - this tool never claims automatic switching of unavailable Cline
 credentials (other Cline logins are advisory until signed in).
 

@@ -8,15 +8,15 @@ model/account order.
 ## Canonical route (pinned)
 
 Machine-readable policy: [`../src/foundry-route-policy.json`](../src/foundry-route-policy.json)
-(`schema: foundry-route-policy/v1`, `policyVersion: 1.0.0`).
+(`schema: foundry-route-policy/v1`, `policyVersion: 1.0.1`).
 PowerShell API: [`../src/CmoFoundryRoute.ps1`](../src/CmoFoundryRoute.ps1).
 
 Order rule is **model-major**: each free model runs across Pi accounts
 1,2,3 before the ladder advances:
 
-1. `cline-free/muse-spark-1.3-contributor` (FREE) x `pi-1,pi-2,pi-3`
-2. `z-ai/glm-5.3-flash` (FREE) x `pi-1,pi-2,pi-3`
-3. `cline-free/deepseek-v4.1-flash` (FREE) x `pi-1,pi-2,pi-3`
+1. `cline-free/muse-spark-1.3-contributor` (FREE) x `account-1,account-2,account-3`
+2. `z-ai/glm-5.3-flash` (FREE) x `account-1,account-2,account-3`
+3. `cline-free/deepseek-v4.1-flash` (FREE) x `account-1,account-2,account-3`
 4. ClinePass subscription tail only:
    `cline-pass/glm-5.3-flash`, `cline-pass/deepseek-v4.1-flash`
 5. **Never pay-as-you-go.** `neverPayg: true`; `allowedTiers` is
@@ -33,7 +33,7 @@ Order rule is **model-major**: each free model runs across Pi accounts
 
 ## Capability precision (Pi vs Cline)
 
-- **Pi CAN rotate isolated account profiles** (`pi-1/pi-2/pi-3`): each
+- **Pi CAN rotate isolated account profiles** (`account-1/account-2/account-3`): each
   profile carries its own credentials and budget, so the 9-leg free queue
   is executable on the Pi side.
 - **The Cline VS Code extension exposes only the ACTIVE login** on disk
@@ -92,5 +92,5 @@ no-PAYG invariant, alias correction, failure taxonomy, and
 
 Cline publishes no quota-remaining API and persists only the active login,
 so Cline-side per-account budget for non-active logins stays `unknown`
-until that login signs in; Pi-side rotation across `pi-1/pi-2/pi-3` is the
+until that login signs in; Pi-side rotation across `account-1/account-2/account-3` is the
 executable path for the full 9-leg queue.

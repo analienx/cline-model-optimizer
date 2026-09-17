@@ -1,9 +1,9 @@
 {
   "schema": "foundry-route-policy/v1",
-  "policyVersion": "1.0.0",
+  "policyVersion": "1.0.1",
   "owner": "cline-model-optimizer",
   "description": "Canonical free-first routing policy owned solely by cline-model-optimizer for Agent Foundry v3. Pi launchers pin policyVersion (and optionally sha256) or validate live config against this file before routing.",
-  "piAccounts": ["pi-1", "pi-2", "pi-3"],
+  "piAccounts": ["account-1", "account-2", "account-3"],
   "orderRule": "model-major: each free model runs across Pi accounts 1,2,3 in order before advancing to the next free model. Subscription tail runs only after all 9 free legs are exhausted.",
   "freeRoute": [
     {
@@ -12,7 +12,7 @@
       "provider": "cline",
       "tier": "FREE",
       "aliases": ["muse-spark-1.3"],
-      "piAccounts": ["pi-1", "pi-2", "pi-3"]
+      "piAccounts": ["account-1", "account-2", "account-3"]
     },
     {
       "rank": 2,
@@ -20,7 +20,7 @@
       "provider": "cline",
       "tier": "FREE",
       "aliases": [],
-      "piAccounts": ["pi-1", "pi-2", "pi-3"]
+      "piAccounts": ["account-1", "account-2", "account-3"]
     },
     {
       "rank": 3,
@@ -28,19 +28,19 @@
       "provider": "cline",
       "tier": "FREE",
       "aliases": ["deepseek/deepseek-v4.1-flash"],
-      "piAccounts": ["pi-1", "pi-2", "pi-3"]
+      "piAccounts": ["account-1", "account-2", "account-3"]
     }
   ],
   "routeQueue": [
-    { "seq": 1, "model": "cline-free/muse-spark-1.3-contributor", "piAccount": "pi-1", "tier": "FREE", "legKind": "free" },
-    { "seq": 2, "model": "cline-free/muse-spark-1.3-contributor", "piAccount": "pi-2", "tier": "FREE", "legKind": "free" },
-    { "seq": 3, "model": "cline-free/muse-spark-1.3-contributor", "piAccount": "pi-3", "tier": "FREE", "legKind": "free" },
-    { "seq": 4, "model": "z-ai/glm-5.3-flash", "piAccount": "pi-1", "tier": "FREE", "legKind": "free" },
-    { "seq": 5, "model": "z-ai/glm-5.3-flash", "piAccount": "pi-2", "tier": "FREE", "legKind": "free" },
-    { "seq": 6, "model": "z-ai/glm-5.3-flash", "piAccount": "pi-3", "tier": "FREE", "legKind": "free" },
-    { "seq": 7, "model": "cline-free/deepseek-v4.1-flash", "piAccount": "pi-1", "tier": "FREE", "legKind": "free" },
-    { "seq": 8, "model": "cline-free/deepseek-v4.1-flash", "piAccount": "pi-2", "tier": "FREE", "legKind": "free" },
-    { "seq": 9, "model": "cline-free/deepseek-v4.1-flash", "piAccount": "pi-3", "tier": "FREE", "legKind": "free" },
+    { "seq": 1, "model": "cline-free/muse-spark-1.3-contributor", "piAccount": "account-1", "tier": "FREE", "legKind": "free" },
+    { "seq": 2, "model": "cline-free/muse-spark-1.3-contributor", "piAccount": "account-2", "tier": "FREE", "legKind": "free" },
+    { "seq": 3, "model": "cline-free/muse-spark-1.3-contributor", "piAccount": "account-3", "tier": "FREE", "legKind": "free" },
+    { "seq": 4, "model": "z-ai/glm-5.3-flash", "piAccount": "account-1", "tier": "FREE", "legKind": "free" },
+    { "seq": 5, "model": "z-ai/glm-5.3-flash", "piAccount": "account-2", "tier": "FREE", "legKind": "free" },
+    { "seq": 6, "model": "z-ai/glm-5.3-flash", "piAccount": "account-3", "tier": "FREE", "legKind": "free" },
+    { "seq": 7, "model": "cline-free/deepseek-v4.1-flash", "piAccount": "account-1", "tier": "FREE", "legKind": "free" },
+    { "seq": 8, "model": "cline-free/deepseek-v4.1-flash", "piAccount": "account-2", "tier": "FREE", "legKind": "free" },
+    { "seq": 9, "model": "cline-free/deepseek-v4.1-flash", "piAccount": "account-3", "tier": "FREE", "legKind": "free" },
     { "seq": 10, "model": "cline-pass/glm-5.3-flash", "piAccount": null, "tier": "SUBSCRIPTION", "legKind": "subscription" },
     { "seq": 11, "model": "cline-pass/deepseek-v4.1-flash", "piAccount": null, "tier": "SUBSCRIPTION", "legKind": "subscription" }
   ],
@@ -87,7 +87,7 @@
     }
   },
   "capability": {
-    "pi": "Pi launchers MAY rotate isolated account profiles (pi-1/pi-2/pi-3) per this queue; each profile carries its own credentials and budget.",
+    "pi": "Pi launchers MAY rotate isolated account profiles (account-1/account-2/account-3) per this queue; each profile carries its own credentials and budget.",
     "cline": "The Cline VS Code extension exposes only the ACTIVE login on disk. This tool never claims automatic switching of unavailable Cline credentials: legs for other Cline logins are advisory ('sign in to unlock') until that login has authenticated on this machine with VS Code closed."
   },
   "ownership": {

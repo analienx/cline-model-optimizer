@@ -9,7 +9,7 @@
 #   Resolve-CmoFoundryModelId   - correct stale aliases to canonical ids
 #
 # CAPABILITY (precise): Pi launchers MAY rotate isolated account profiles
-# (pi-1/pi-2/pi-3). The Cline VS Code extension exposes only the ACTIVE login on
+# (account-1/account-2/account-3). The Cline VS Code extension exposes only the ACTIVE login on
 # disk, so this module never claims automatic switching of unavailable Cline
 # credentials - legs for other Cline logins are advisory until signed in.
 # Secrets/tokens are never read, logged, or written here (metadata only).
@@ -63,7 +63,7 @@ function Test-CmoFoundryRoutePolicy {
     if ([string]$Policy.owner -ne 'cline-model-optimizer') { $errors += 'owner must be cline-model-optimizer' }
     if ($Policy.neverPayg -ne $true) { $errors += 'neverPayg must be true' }
     $accts = @($Policy.piAccounts)
-    foreach ($want in @('pi-1', 'pi-2', 'pi-3')) {
+    foreach ($want in @('account-1', 'account-2', 'account-3')) {
         if (-not ($accts -contains $want)) { $errors += ("piAccounts missing " + $want) }
     }
     $freeModels = @($Policy.freeRoute | ForEach-Object { [string]$_.model })
@@ -90,8 +90,8 @@ function Test-CmoFoundryRoutePolicy {
             if ($block.Count -ne 3) { $errors += ("model " + $m + " must span 3 pi accounts") }
             else {
                 for ($a = 0; $a -lt 3; $a++) {
-                    if ([string]$block[$a].piAccount -ne ('pi-' + ($a + 1))) {
-                        $errors += ("model " + $m + " account order must be pi-1,pi-2,pi-3")
+                    if ([string]$block[$a].piAccount -ne ('account-' + ($a + 1))) {
+                        $errors += ("model " + $m + " account order must be account-1,account-2,account-3")
                     }
                 }
             }

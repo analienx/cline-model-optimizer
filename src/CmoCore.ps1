@@ -647,7 +647,7 @@ function Get-CmoAutoSwitchPlan {
     # only. Cline persists ONE active login on disk, so other accounts have no
     # credentials to auto-switch here - cross-account rotation in the Cline
     # extension is advisory (sign in to unlock). Pi launchers rotate isolated
-    # account profiles (pi-1/pi-2/pi-3) per src/foundry-route-policy.json.
+    # account profiles (account-1/account-2/account-3) per src/foundry-route-policy.json.
     # When the live free model is capped, plan the next GREEN free model on the
     # ladder; when every free model is capped, optionally fall back to
     # subscription (Cline Pass) only - never pay-as-you-go.

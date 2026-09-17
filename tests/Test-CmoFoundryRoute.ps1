@@ -31,12 +31,12 @@ Assert-Cmo ($freeModels[0] -eq 'cline-free/muse-spark-1.3-contributor') 'rank 1 
 Assert-Cmo ($freeModels[1] -eq 'z-ai/glm-5.3-flash') 'rank 2 must be GLM-5.3 Flash free'
 Assert-Cmo ($freeModels[2] -eq 'cline-free/deepseek-v4.1-flash') 'rank 3 must be DeepSeek V4.1 Flash free'
 
-# 3. Model-first (model-major) account order across pi-1,pi-2,pi-3.
+# 3. Model-first (model-major) account order across account-1,account-2,account-3.
 $queue = @(Get-CmoFoundryRouteQueue -Policy $policy)
 $freeLegs = @($queue | Where-Object { [string]$_.tier -eq 'FREE' })
 Assert-Cmo ($freeLegs.Count -eq 9) 'queue must hold exactly 9 free legs (3 models x 3 accounts)'
 $expected = @()
-foreach ($m in $freeModels) { foreach ($a in @('pi-1', 'pi-2', 'pi-3')) { $expected += ($m + '|' + $a) } }
+foreach ($m in $freeModels) { foreach ($a in @('account-1', 'account-2', 'account-3')) { $expected += ($m + '|' + $a) } }
 $actual = @($freeLegs | ForEach-Object { ([string]$_.model + '|' + [string]$_.piAccount) })
 Assert-Cmo ($actual.Count -eq $expected.Count) 'free leg count mismatch'
 for ($i = 0; $i -lt $expected.Count; $i++) {
@@ -45,18 +45,18 @@ for ($i = 0; $i -lt $expected.Count; $i++) {
 
 # 4. Exhaustion: spent legs are skipped model-first, never jumping models early.
 $next = Resolve-CmoFoundryNextStep -Policy $policy -ExhaustedLegs @()
-Assert-Cmo (($next.model -eq $freeModels[0]) -and ($next.piAccount -eq 'pi-1')) 'fresh queue must start at Muse Spark pi-1'
-$next = Resolve-CmoFoundryNextStep -Policy $policy -ExhaustedLegs @('cline-free/muse-spark-1.3-contributor|pi-1')
-Assert-Cmo (($next.model -eq $freeModels[0]) -and ($next.piAccount -eq 'pi-2')) 'must rotate to pi-2 before leaving Muse Spark'
+Assert-Cmo (($next.model -eq $freeModels[0]) -and ($next.piAccount -eq 'account-1')) 'fresh queue must start at Muse Spark account-1'
+$next = Resolve-CmoFoundryNextStep -Policy $policy -ExhaustedLegs @('cline-free/muse-spark-1.3-contributor|account-1')
+Assert-Cmo (($next.model -eq $freeModels[0]) -and ($next.piAccount -eq 'account-2')) 'must rotate to account-2 before leaving Muse Spark'
 $spentMuse = @(
-    'cline-free/muse-spark-1.3-contributor|pi-1',
-    'cline-free/muse-spark-1.3-contributor|pi-2',
-    'cline-free/muse-spark-1.3-contributor|pi-3'
+    'cline-free/muse-spark-1.3-contributor|account-1',
+    'cline-free/muse-spark-1.3-contributor|account-2',
+    'cline-free/muse-spark-1.3-contributor|account-3'
 )
 $next = Resolve-CmoFoundryNextStep -Policy $policy -ExhaustedLegs $spentMuse
-Assert-Cmo (($next.model -eq 'z-ai/glm-5.3-flash') -and ($next.piAccount -eq 'pi-1')) 'after Muse Spark exhaustion must advance to GLM pi-1'
+Assert-Cmo (($next.model -eq 'z-ai/glm-5.3-flash') -and ($next.piAccount -eq 'account-1')) 'after Muse Spark exhaustion must advance to GLM account-1'
 $spentAllFree = @()
-foreach ($m in $freeModels) { foreach ($a in @('pi-1', 'pi-2', 'pi-3')) { $spentAllFree += ($m + '|' + $a) } }
+foreach ($m in $freeModels) { foreach ($a in @('account-1', 'account-2', 'account-3')) { $spentAllFree += ($m + '|' + $a) } }
 $next = Resolve-CmoFoundryNextStep -Policy $policy -ExhaustedLegs $spentAllFree
 Assert-Cmo ($next.legKind -eq 'subscription') 'all-free-exhausted must fall back to subscription'
 Assert-Cmo ([string]$next.tier -eq 'SUBSCRIPTION') 'fallback leg must be SUBSCRIPTION tier'
