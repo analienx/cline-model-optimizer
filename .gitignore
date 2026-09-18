@@ -5,3 +5,4 @@ Thumbs.db
 src/free-models.json
 src/guardian-state.json
 src/guardian-status.json
+__pycache__/
