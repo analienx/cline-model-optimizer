@@ -7,7 +7,9 @@
 #   - cline auth token expires < 12h or expired -> toast (rate-limited 6h)
 # Tracks cumulative tier-usage minutes per day in guardian-state.json.
 # Writes %LOCALAPPDATA%\ClineModelOptimizer\guardian-status.json for the dashboard.
-# Exit codes: 0=optimal 1=free-in-use-suboptimal 2=paid-in-use 3=auth-warning 4=state-missing
+# Exit codes: 0=optimal 1=free-in-use-suboptimal 2=subscription/paid-observed (never routed to) 3=auth-warning 4=state-missing
+# Routing policy: subscription (Cline Pass) is the only fallback; never pay-as-you-go
+# (sole owner: cline-model-optimizer, docs/ROUTING-OWNERSHIP.md).
 
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -124,7 +126,14 @@ try {
 # ---- evaluate ----
 $act = $snap.Act
 $dynCount = @($snap.DynamicFree.Models).Count
-Write-Log ("free list: {0} models - source={1} fresh={2}{3}" -f $dynCount, $snap.DynamicFree.Source, $snap.DynamicFree.Fresh, $(if ($snap.DynamicFree.Error) { ' error=' + $snap.DynamicFree.Error } else { '' }))
+# Foundry v3 failure taxonomy (quota=advance queue, auth=re-sign-in, transient=retry same leg).
+$dynKind = 'unknown'
+try {
+    if ($snap.DynamicFree.Error) { $dynKind = Get-CmoFailureKind -ErrorText ([string]$snap.DynamicFree.Error) }
+    elseif (-not $snap.DynamicFree.Fresh) { $dynKind = 'transient' }
+    else { $dynKind = 'ok' }
+} catch { }
+Write-Log ("free list: {0} models - source={1} fresh={2} kind={3}{4}" -f $dynCount, $snap.DynamicFree.Source, $snap.DynamicFree.Fresh, $dynKind, $(if ($snap.DynamicFree.Error) { ' error=' + $snap.DynamicFree.Error } else { '' }))
 Write-Log ("ACT: provider=" + $act.Provider + " model=" + $act.Model + " tier=" + $act.Tier + " | optimal=" + $act.Recommendation.Optimal)
 Write-Log ("PLAN: provider=" + $snap.Plan.Provider + " model=" + $snap.Plan.Model + " tier=" + $snap.Plan.Tier)
 # ---- auto-switch: the original idea, adapted (see Get-CmoAutoSwitchPlan) ----

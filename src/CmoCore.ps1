@@ -11,6 +11,8 @@ function Get-CmoDataDir {
 . (Join-Path $PSScriptRoot 'CmoAccounts.ps1')
 # real usage from Cline's API + automatic cap-hit detection from transcripts
 . (Join-Path $PSScriptRoot 'CmoUsage.ps1')
+# canonical Foundry v3 route policy API (sole routing-policy owner; never PAYG)
+. (Join-Path $PSScriptRoot 'CmoFoundryRoute.ps1')
 
 function Get-CmoRoutingConfig {
     param([string]$ConfigPath)
@@ -545,6 +547,10 @@ function Get-CmoEffectiveStrategy {
             $steps += [pscustomobject]@{ provider=$s.provider; model=$s.model; thinking=$s.thinking; tier=$tier; source='static'; live=$true }
         }
     }
+    # Foundry v3 canonical policy (docs/ROUTING-OWNERSHIP.md): subscription is
+    # the only allowed fallback - PAID legs are never routed to, only observed.
+    # Drop any PAID-tier step so a stale static entry can never become a target.
+    $steps = @($steps | Where-Object { [string]$_.tier -ne 'PAID' })
     return [pscustomobject]@{ Steps = @($steps); Dynamic = $dyn; MaxFreeModels = $maxFree }
 }
 
@@ -637,12 +643,14 @@ function Get-CmoSnapshot {
 
 
 function Get-CmoAutoSwitchPlan {
-    # The original idea, adapted to what is technically possible: Cline holds ONE
-    # login at a time (other accounts have no tokens on disk - obtained via
-    # per-account browser OAuth), so ACCOUNT switching cannot be automated.
-    # MODEL switching within the signed-in account can: when the live free model
-    # is capped, plan the next GREEN free model on the ladder; when every free
-    # model is capped, optionally fall back to subscription (never paid).
+    # Foundry v3 canonical policy: MODEL switching within the signed-in account
+    # only. Cline persists ONE active login on disk, so other accounts have no
+    # credentials to auto-switch here - cross-account rotation in the Cline
+    # extension is advisory (sign in to unlock). Pi launchers rotate isolated
+    # account profiles (account-1/account-2/account-3) per src/foundry-route-policy.json.
+    # When the live free model is capped, plan the next GREEN free model on the
+    # ladder; when every free model is capped, optionally fall back to
+    # subscription (Cline Pass) only - never pay-as-you-go.
     param([object]$Routing, [object]$Act, [object]$UsageState)
     if (-not $Act) { return $null }
     $enabled = $true; $allowSub = $true
