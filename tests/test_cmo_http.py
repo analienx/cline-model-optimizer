@@ -118,7 +118,7 @@ class HealthAndReadTests(ServerCase):
 
     def test_static_assets_are_served_from_the_package(self) -> None:
         for path, marker, ctype in (
-            ("/", b"CMO trustworthy status", "text/html"),
+            ("/", b"Cline Model Optimizer", "text/html"),
             ("/app.js", b"EventSource", "application/javascript"),
             ("/style.css", b":root", "text/css"),
         ):

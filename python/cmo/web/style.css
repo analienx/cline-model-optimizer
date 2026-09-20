@@ -141,3 +141,72 @@ footer { padding: 0 20px 28px; color: var(--muted); font-size: 12px; max-width: 
 .warn-text { color: var(--warn); }
 .bad-text { color: var(--bad); }
 .ok-text { color: var(--ok); }
+
+/* ---- first-class views (D01/D18/D19/D20) ---- */
+.viewnav { background: var(--surface); border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; z-index: 5; }
+.viewnav-inner { display: flex; gap: 4px; max-width: 1400px; margin: 0 auto;
+  padding: 8px 20px; overflow-x: auto; }
+.viewtab { background: transparent; color: var(--muted); border: 1px solid transparent;
+  border-radius: 8px; padding: 10px 16px; cursor: pointer; font-size: 14px;
+  font-weight: 600; white-space: nowrap; min-height: 44px; }
+.viewtab:hover { color: var(--text); border-color: var(--line); }
+.viewtab-active { color: var(--text); background: var(--surface-2);
+  border-color: var(--accent); }
+.viewtab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.toast { margin: 12px auto 0; max-width: 1400px; padding: 10px 14px;
+  border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2);
+  display: none; }
+.toast-show { display: block; }
+.toast-ok { border-color: var(--ok); }
+.toast-bad { border-color: var(--bad); color: #f6c3ba; }
+
+.steps { margin: 6px 0 12px 20px; padding: 0; color: var(--muted); font-size: 13px; }
+.formgrid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.preview { background: var(--surface-2); border: 1px dashed var(--accent);
+  border-radius: 10px; padding: 10px 12px; margin-top: 10px; }
+.draftbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  background: rgba(224,166,58,.1); border: 1px solid var(--warn);
+  border-radius: 10px; padding: 10px 12px; margin: 10px 0; }
+.btn-primary { border-color: var(--accent); color: #bff3ec; font-weight: 600; }
+.ladder { list-style: decimal; margin: 0; padding-left: 24px; display: grid; gap: 10px; }
+.ladder li { background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 10px; padding: 9px 11px; }
+.cellbox { margin: 0; }
+.cellbox > summary { cursor: pointer; list-style: none; border-radius: 6px; }
+.cellbox > summary::-webkit-details-marker { display: none; }
+.cellbox > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cell-detail { padding: 6px 2px 2px; }
+.cell-detail ul li { font-size: 12px; background: none; border: none; padding: 1px 0; }
+
+@media (max-width: 640px) {
+  html, body { font-size: 14px; }
+  main { padding: 12px 12px 32px; }
+  .topbar, .viewnav-inner { padding-left: 12px; padding-right: 12px; }
+  .banner, .toast { margin-left: 12px; margin-right: 12px; }
+  .btn, .viewtab, select, input { min-height: 44px; }
+  .btn-mini { min-height: 44px; min-width: 44px; padding: 8px 12px; font-size: 13px; }
+  /* matrix/tables become stacked cards: no page-level horizontal scroll */
+  .tablewrap { overflow-x: visible; }
+  table.cards-table, table.cards-table thead, table.cards-table tbody,
+  table.cards-table tr, table.cards-table th, table.cards-table td { display: block; width: 100%; }
+  table.cards-table thead { position: absolute; width: 1px; height: 1px;
+    overflow: hidden; clip: rect(0 0 0 0); }
+  table.cards-table tr { border: 1px solid var(--line); border-radius: 10px;
+    margin-bottom: 10px; background: var(--surface-2); }
+  table.cards-table th, table.cards-table td { border: none;
+    border-bottom: 1px solid var(--line); }
+  table.cards-table th:last-child, table.cards-table td:last-child { border-bottom: none; }
+  table.cards-table td::before { content: attr(data-label); display: block;
+    color: var(--muted); font-size: 11px; text-transform: uppercase;
+    letter-spacing: .04em; }
+  table.cards-table td:empty::before { content: none; }
+  .cell { min-width: 0; }
+}
+@media (min-width: 1100px) {
+  #view-overview { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  #view-overview > .card:first-child { grid-column: 1 / -1; }
+  #view-overview > .card:nth-child(4) { grid-column: 1 / -1; }
+  #view-overview > .card:nth-child(5) { grid-column: 1 / -1; }
+}

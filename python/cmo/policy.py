@@ -10,9 +10,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 POLICY_SCHEMA = "cmo.route-policy/v2"
+
+# Account registry: CMO owns the account list. ``accounts`` is an ordered
+# registry, not a fixed set: aliases beyond account-1..3 are allowed and the
+# saved priority order drives route expansion. A tracked alias is never
+# route-ready until its profile is verified out of band.
+ACCOUNT_STATUSES = ("tracked", "profile", "signin-needed", "verified",
+                    "auth-problem", "disabled")
+ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
+
+ACCOUNT_KEYS = {"id", "label", "enabled", "priority", "profile",
+                "status"}
 
 TIER_FREE = "free"
 TIER_SUBSCRIPTION = "subscription"
@@ -50,7 +62,8 @@ ALLOWED_TOP_KEYS = REQUIRED_TOP_KEYS | {
 
 # A route entry may carry only these keys; anything else is rejected so that
 # a paid fallback cannot be smuggled into the policy document.
-ROUTE_KEYS = {"model", "provider", "tier", "accounts", "thinking", "aliases", "rank"}
+ROUTE_KEYS = {"model", "provider", "tier", "accounts", "thinking",
+              "aliases", "rank", "enabled", "pinned"}
 
 STRATEGY_FREE_FIRST = "free-first"
 STRATEGY_STANDARD = "standard"
@@ -67,7 +80,9 @@ FOCUSED_MODEL_MATCH = {
 # Reason taxonomy shared with the Pi adapter (no invented percentages).
 REASON_QUOTA_CONFIRMED = "quota.confirmed"
 REASON_QUOTA_UNKNOWN = "quota.reset_unknown"
+REASON_QUOTA_PROBE = "quota.probe_confirmed"
 REASON_AUTH = "auth.required"
+REASON_AUTH_PROBE = "auth.probe_failed"
 REASON_TRANSIENT = "transient.failure"
 REASON_CAPABILITY = "capability.not_offered"
 REASON_CONTEXT = "context.exhausted"
@@ -77,7 +92,8 @@ REASON_UNKNOWN = "unknown"
 FAILURE_TAXONOMY: dict[str, dict[str, Any]] = {
     "quota": {
         "states": ["QUOTA"],
-        "reason_codes": [REASON_QUOTA_CONFIRMED, REASON_QUOTA_UNKNOWN],
+        "reason_codes": [REASON_QUOTA_CONFIRMED, REASON_QUOTA_UNKNOWN,
+                        REASON_QUOTA_PROBE],
         "meaning": "Free/subscription budget for this route is exhausted for now. "
                    "Advance to the next account, then the next model.",
         "signals": ["INFERENCE_CAP_ERROR", "inference cap", "status code 429",
@@ -86,7 +102,7 @@ FAILURE_TAXONOMY: dict[str, dict[str, Any]] = {
     },
     "auth": {
         "states": ["AUTH_BLOCKED"],
-        "reason_codes": [REASON_AUTH],
+        "reason_codes": [REASON_AUTH, REASON_AUTH_PROBE],
         "meaning": "Credential invalid, expired or missing. Do not advance the "
                    "queue as if budget were spent; surface re-sign-in.",
         "signals": ["401", "403", "unauthorized", "forbidden", "token expired",
@@ -94,7 +110,8 @@ FAILURE_TAXONOMY: dict[str, dict[str, Any]] = {
     },
     "transient": {
         "states": ["TRANSIENT"],
-        "reason_codes": [REASON_TRANSIENT],
+        "reason_codes": [REASON_TRANSIENT, "transient.failure",
+                        "recheck.timeout"],
         "meaning": "Network or server hiccup. Retry the same route within the "
                    "bounded recovery rule; do not rotate as if quota were spent.",
         "signals": ["timeout", "timed out", "connection", "reset by peer", "502",
@@ -103,7 +120,7 @@ FAILURE_TAXONOMY: dict[str, dict[str, Any]] = {
     },
     "capability": {
         "states": ["CAPABILITY_UNAVAILABLE"],
-        "reason_codes": [REASON_CAPABILITY],
+        "reason_codes": [REASON_CAPABILITY, "capability.not_offered"],
         "meaning": "The catalog reports the model is not offered. Only a fresh "
                    "explicit catalog omission is capability evidence.",
         "signals": ["not offered", "no such model", "unknown model",
@@ -134,9 +151,12 @@ def canonical_policy_document() -> dict[str, Any]:
         "neverPayg": True,
         "tiers": list(ALLOWED_TIERS),
         "accounts": [
-            {"id": "account-1", "enabled": True},
-            {"id": "account-2", "enabled": True},
-            {"id": "account-3", "enabled": True},
+            {"id": "account-1", "enabled": True, "priority": 0,
+             "status": "tracked"},
+            {"id": "account-2", "enabled": True, "priority": 1,
+             "status": "tracked"},
+            {"id": "account-3", "enabled": True, "priority": 2,
+             "status": "tracked"},
         ],
         "strategies": {
             STRATEGY_FREE_FIRST: {
@@ -188,6 +208,47 @@ def canonical_policy_document() -> dict[str, Any]:
     }
 
 
+def _validate_accounts(accounts: Any) -> list[dict[str, Any]]:
+    """Validate the account registry; return normalized entries."""
+    if not isinstance(accounts, list) or not accounts:
+        raise PolicyError("accounts must be a non-empty list")
+    seen: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for i, entry in enumerate(accounts):
+        if not isinstance(entry, dict):
+            raise PolicyError(f"accounts[{i}] must be an object")
+        unexpected = set(entry) - ACCOUNT_KEYS
+        if unexpected:
+            raise PolicyError(f"accounts[{i}] has unexpected keys: {sorted(unexpected)}")
+        alias = entry.get("id")
+        if not isinstance(alias, str) or not ALIAS_RE.match(alias):
+            raise PolicyError(
+                f"accounts[{i}].id must match {ALIAS_RE.pattern}")
+        if alias in seen:
+            raise PolicyError(f"duplicate account id: {alias}")
+        seen.add(alias)
+        label = entry.get("label", alias)
+        if not isinstance(label, str) or not label or len(label) > 64:
+            raise PolicyError(f"accounts[{i}].label must be a non-empty string (<=64)")
+        enabled = entry.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise PolicyError(f"accounts[{i}].enabled must be a boolean")
+        priority = entry.get("priority", i)
+        if not isinstance(priority, int) or priority < 0:
+            raise PolicyError(f"accounts[{i}].priority must be a non-negative integer")
+        profile = entry.get("profile", alias)
+        if not isinstance(profile, str) or not profile or len(profile) > 64:
+            raise PolicyError(f"accounts[{i}].profile must be a non-empty string (<=64)")
+        status = entry.get("status", "tracked")
+        if status not in ACCOUNT_STATUSES:
+            raise PolicyError(
+                f"accounts[{i}].status must be one of {list(ACCOUNT_STATUSES)}")
+        normalized.append({"id": alias, "label": label, "enabled": enabled,
+                           "priority": priority, "profile": profile,
+                           "status": status})
+    return normalized
+
+
 def validate_policy(doc: Any) -> dict[str, Any]:
     """Validate a policy document; raise PolicyError on any violation."""
     if not isinstance(doc, dict):
@@ -212,6 +273,12 @@ def validate_policy(doc: Any) -> dict[str, Any]:
     routes = doc["routes"]
     if not isinstance(routes, list) or not routes:
         raise PolicyError("routes must be a non-empty list")
+    accounts = _validate_accounts(doc.get("accounts"))
+    known = {a["id"] for a in accounts}
+    enabled_order = [a["id"] for a in sorted(accounts, key=lambda a: (a["priority"], a["id"]))
+                     if a["enabled"] and a["status"] != "disabled"]
+    if not enabled_order:
+        raise PolicyError("at least one account must be enabled")
     seen_models: set[str] = set()
     for i, route in enumerate(routes):
         if not isinstance(route, dict):
@@ -237,6 +304,14 @@ def validate_policy(doc: Any) -> dict[str, Any]:
             raise PolicyError(f"route[{i}].accounts must be a non-empty list of non-empty strings")
         if len(set(accounts)) != len(accounts):
             raise PolicyError(f"route[{i}].accounts must not contain duplicates")
+        unknown = [a for a in accounts if a not in known]
+        if unknown:
+            raise PolicyError(
+                f"route[{i}].accounts reference unknown account(s): {unknown}; "
+                "register them in policy accounts first")
+        for key in ("enabled", "pinned"):
+            if key in route and not isinstance(route[key], bool):
+                raise PolicyError(f"route[{i}].{key} must be a boolean")
         if route.get("tier") == TIER_FREE and provider != PROVIDER_CLINE:
             raise PolicyError(f"route[{i}] free routes must use provider {PROVIDER_CLINE}")
         if route.get("tier") == TIER_SUBSCRIPTION and provider != PROVIDER_CLINE_PASS:
@@ -251,6 +326,10 @@ def validate_policy(doc: Any) -> dict[str, Any]:
         value = defaults.get(key)
         if not isinstance(value, int) or value < 0 or (value == 0 and key != "max_transient_retries"):
             raise PolicyError(f"defaults.{key} must be a positive integer")
+    if "max_enabled_free_models" in defaults:
+        cap = defaults["max_enabled_free_models"]
+        if not isinstance(cap, int) or cap <= 0:
+            raise PolicyError("defaults.max_enabled_free_models must be a positive integer")
 
     strategies = doc.get("strategies")
     if not isinstance(strategies, dict) or not strategies:
@@ -290,11 +369,37 @@ def all_routes(policy: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     return list((policy or load_canonical_policy())["routes"])
 
 
+def account_order(policy: dict[str, Any] | None = None) -> list[str]:
+    """Enabled account ids in saved priority order (priority, then id)."""
+    policy = policy or load_canonical_policy()
+    accounts = _validate_accounts(policy.get("accounts"))
+    return [a["id"] for a in sorted(accounts, key=lambda a: (a["priority"], a["id"]))
+            if a["enabled"] and a["status"] != "disabled"]
+
+
 def route_cells(policy: dict[str, Any] | None = None) -> list[dict[str, str]]:
-    """Every (route, account) cell as a canonical ordered list."""
+    """Every (route, account) cell as a canonical ordered list.
+
+    Honors saved policy: disabled routes are skipped, accounts expand in
+    saved priority order, and the free ladder is capped at
+    ``defaults.max_enabled_free_models`` when configured.
+    """
+    policy = policy or load_canonical_policy()
+    order = account_order(policy)
+    rank = {alias: i for i, alias in enumerate(order)}
+    cap = policy.get("defaults", {}).get("max_enabled_free_models")
     cells: list[dict[str, str]] = []
+    free_used = 0
     for route in all_routes(policy):
-        for account in route["accounts"]:
+        if route.get("enabled", True) is False:
+            continue
+        if route["tier"] == TIER_FREE and isinstance(cap, int):
+            if free_used >= cap:
+                continue
+            free_used += 1
+        for account in sorted(route["accounts"], key=lambda a: rank.get(a, 1 << 30)):
+            if account not in rank:
+                continue
             cells.append({
                 "route_key": route_key(account, route["provider"], route["model"], route["tier"]),
                 "account_alias": account,
@@ -306,9 +411,13 @@ def route_cells(policy: dict[str, Any] | None = None) -> list[dict[str, str]]:
 
 
 def routes_for_strategy(strategy: str, policy: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """Ordered routes for a strategy; focused strategies filter by model."""
+    """Ordered routes for a strategy; focused strategies filter by model.
+
+    Disabled routes are excluded so a saved edit takes effect on later
+    decisions while pinned running Goals keep their own route.
+    """
     policy = policy or load_canonical_policy()
-    routes = all_routes(policy)
+    routes = [r for r in all_routes(policy) if r.get("enabled", True) is not False]
     if strategy == STRATEGY_STANDARD:
         return [r for r in routes if r["tier"] == TIER_SUBSCRIPTION]
     if strategy in FOCUSED_STRATEGIES:

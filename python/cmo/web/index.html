@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CMO trustworthy status</title>
+<title>CMO dashboard</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,8 +12,8 @@
   <div class="brand">
     <span class="mark" aria-hidden="true">CMO</span>
     <div>
-      <h1>Trustworthy model &amp; account status</h1>
-      <p class="sub">Cline Model Optimizer v2 — sole routing, account and model status authority. Free-first, ClinePass subscription fallback, never pay-as-you-go.</p>
+      <h1>Cline Model Optimizer</h1>
+      <p class="sub">Sole routing, account and model status authority. Free-first, ClinePass subscription fallback, never pay-as-you-go.</p>
     </div>
   </div>
   <div class="topbar-right">
@@ -22,50 +22,178 @@
   </div>
 </header>
 
+<nav class="viewnav" aria-label="Dashboard views">
+  <div class="viewnav-inner" role="tablist" aria-label="Dashboard views">
+    <button role="tab" data-view="overview" aria-selected="true" aria-controls="view-overview" id="tab-overview" type="button" class="viewtab viewtab-active">Overview</button>
+    <button role="tab" data-view="accounts" aria-selected="false" aria-controls="view-accounts" id="tab-accounts" type="button" class="viewtab">Accounts</button>
+    <button role="tab" data-view="routing" aria-selected="false" aria-controls="view-routing" id="tab-routing" type="button" class="viewtab">Routing</button>
+    <button role="tab" data-view="activity" aria-selected="false" aria-controls="view-activity" id="tab-activity" type="button" class="viewtab">Activity</button>
+    <button role="tab" data-view="diagnostics" aria-selected="false" aria-controls="view-diagnostics" id="tab-diagnostics" type="button" class="viewtab">Diagnostics</button>
+  </div>
+</nav>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 <div id="banner" class="banner" role="alert" hidden></div>
 
 <main id="main" tabindex="-1">
 
-  <section class="card" aria-labelledby="vitals-h">
-    <h2 id="vitals-h">Service &amp; evidence freshness</h2>
-    <div class="vitals" id="vitals"></div>
-  </section>
+  <div id="view-overview" role="tabpanel" aria-labelledby="tab-overview">
+    <section class="card" aria-labelledby="vitals-h">
+      <h2 id="vitals-h">Service &amp; evidence freshness</h2>
+      <div class="vitals" id="vitals"></div>
+    </section>
 
-  <section class="card" aria-labelledby="decision-h">
-    <div class="card-head">
-      <h2 id="decision-h">Route decision</h2>
-      <div class="controls">
-        <label for="strategy">Strategy</label>
-        <select id="strategy">
-          <option value="free-first">free-first (free ladder → subscription tail)</option>
-          <option value="standard">standard (subscription only)</option>
-          <option value="muse-flash">muse-flash</option>
-          <option value="glm-flash">glm-flash</option>
-          <option value="deepseek-flash">deepseek-flash</option>
-        </select>
-        <label for="goal-select">Goal</label>
-        <select id="goal-select"><option value="">auto (most recent active)</option></select>
+    <section class="card" aria-labelledby="work-h">
+      <h2 id="work-h">Current work</h2>
+      <div id="current-work"></div>
+    </section>
+
+    <section class="card" aria-labelledby="decision-h">
+      <div class="card-head">
+        <h2 id="decision-h">Next route</h2>
+        <div class="controls">
+          <label for="goal-select">Goal</label>
+          <select id="goal-select"><option value="">auto (most recent active)</option></select>
+          <label for="preview-strategy">Hypothetical preview</label>
+          <select id="preview-strategy">
+            <option value="">live recommendation</option>
+            <option value="free-first">free-first</option>
+            <option value="standard">standard (subscription only)</option>
+            <option value="muse-flash">muse-flash</option>
+            <option value="glm-flash">glm-flash</option>
+            <option value="deepseek-flash">deepseek-flash</option>
+          </select>
+        </div>
       </div>
+      <p class="hint" id="decision-kind"></p>
+      <div id="decision" class="decision"></div>
+      <div id="skipped"></div>
+    </section>
+
+    <section class="card" aria-labelledby="matrix-h">
+      <div class="card-head">
+        <h2 id="matrix-h">Free route status</h2>
+      </div>
+      <p class="hint">Models and accounts follow your saved order. A leg counts as usable only from recorded evidence for that exact account, provider, model and tier. Blank legs stay <strong>Unknown</strong> with a reason.</p>
+      <div class="tablewrap"><table id="free-matrix" class="cards-table"><caption class="sr-only">Free route status per model and account</caption></table></div>
+      <div class="legend" id="legend"></div>
+    </section>
+
+    <section class="card" aria-labelledby="sub-h">
+      <h2 id="sub-h">ClinePass subscription tail</h2>
+      <p class="hint">Subscription is a fallback only. FreeOnly Goals never use it; pay-as-you-go is impossible.</p>
+      <div class="tablewrap"><table id="subscription" class="cards-table"><caption class="sr-only">Subscription route status</caption></table></div>
+    </section>
+  </div>
+
+  <div id="view-accounts" role="tabpanel" aria-labelledby="tab-accounts" hidden>
+    <section class="card" aria-labelledby="accounts-h">
+      <div class="card-head">
+        <h2 id="accounts-h">Accounts</h2>
+        <p class="hint">Tracked only is never route-ready. Profile created, sign-in needed, verified, auth problem and disabled are distinct states.</p>
+      </div>
+      <div id="account-list"></div>
+    </section>
+    <section class="card" aria-labelledby="add-account-h">
+      <h2 id="add-account-h">Add account</h2>
+      <ol class="steps">
+        <li>Choose an alias and label.</li>
+        <li>Create the isolated Pi profile with the named helper (shown below).</li>
+        <li>Complete the normal sign-in yourself; CMO never accepts passwords or tokens.</li>
+        <li>Verify identity and distinctness, then enable the account for routing.</li>
+      </ol>
+      <form id="account-form" class="formgrid">
+        <label>Alias <input name="id" required placeholder="account-4" size="12" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,31}"></label>
+        <label>Label <input name="label" placeholder="Work login" size="18"></label>
+        <label>Pi profile <input name="profile" placeholder="defaults to alias" size="14"></label>
+        <label>Attach to free routes
+          <select name="attach_routes" multiple size="3" id="account-attach"></select>
+        </label>
+        <div class="formrow">
+          <button type="submit" name="preview" value="1" class="btn">Preview impact</button>
+          <button type="submit" class="btn btn-primary">Add account (tracked only)</button>
+        </div>
+      </form>
+      <div id="account-result"></div>
+    </section>
+  </div>
+
+  <div id="view-routing" role="tabpanel" aria-labelledby="tab-routing" hidden>
+    <section class="card" aria-labelledby="routing-h">
+      <div class="card-head">
+        <h2 id="routing-h">Routing policy</h2>
+        <div class="controls" id="policy-meta"></div>
+      </div>
+      <p class="hint">Model priority picks the model first; account priority picks the account within a model; availability picks from live evidence. Expansion is model-major: the selected model across enabled accounts, then the next model, then the subscription tail.</p>
+      <div class="draftbar" id="draftbar" hidden>
+        <strong>Unsaved draft changes.</strong>
+        <button id="draft-preview" type="button" class="btn">Preview route order</button>
+        <button id="draft-save" type="button" class="btn btn-primary">Save policy</button>
+        <button id="draft-discard" type="button" class="btn btn-quiet">Discard draft</button>
+      </div>
+      <div id="route-preview"></div>
+    </section>
+    <div class="split">
+      <section class="card" aria-labelledby="ladder-free-h">
+        <h2 id="ladder-free-h">Free models ladder</h2>
+        <div id="ladder-free"></div>
+        <form id="model-add-form" class="formrow">
+          <label>Add from catalog <select id="model-add-select" name="model"></select></label>
+          <button type="submit" class="btn">Add model</button>
+        </form>
+      </section>
+      <section class="card" aria-labelledby="ladder-sub-h">
+        <h2 id="ladder-sub-h">ClinePass subscription ladder</h2>
+        <div id="ladder-sub"></div>
+      </section>
     </div>
-    <div id="decision" class="decision"></div>
-    <div id="skipped"></div>
-  </section>
+    <section class="card" aria-labelledby="acct-order-h">
+      <div class="card-head">
+        <h2 id="acct-order-h">Account order</h2>
+        <label>Max enabled free models <input id="max-free" type="number" min="1" max="25" size="3"></label>
+      </div>
+      <div id="account-order"></div>
+      <div class="formrow">
+        <button id="policy-reset" type="button" class="btn btn-quiet">Reset defaults</button>
+        <label>Rollback to version <select id="rollback-select"></select></label>
+        <button id="policy-rollback" type="button" class="btn">Roll back</button>
+      </div>
+      <div id="policy-result"></div>
+    </section>
+  </div>
 
-  <section class="card" aria-labelledby="matrix-h">
-    <div class="card-head">
-      <h2 id="matrix-h">Pi free route matrix (model-major × account)</h2>
-      <p class="hint">A leg counts as usable only from recorded evidence for that exact account, provider, model and tier. Blank legs stay <strong>Unknown</strong>.</p>
-    </div>
-    <div class="tablewrap"><table id="free-matrix"><caption class="sr-only">Free route status per model and account</caption></table></div>
-    <div class="legend" id="legend"></div>
-  </section>
+  <div id="view-activity" role="tabpanel" aria-labelledby="tab-activity" hidden>
+    <section class="card" aria-labelledby="recheck-h">
+      <h2 id="recheck-h">Recheck requests</h2>
+      <div id="rechecks"></div>
+    </section>
+    <section class="card" aria-labelledby="quota-h">
+      <h2 id="quota-h">Quota evidence</h2>
+      <p class="hint">Only recorded provider evidence is shown. Reset times that were never observed are labelled <strong>reset unknown</strong> with the bounded next check.</p>
+      <div id="quota"></div>
+    </section>
+    <section class="card" aria-labelledby="auth-h">
+      <h2 id="auth-h">Auth evidence</h2>
+      <p class="hint">Separate from quota and capability. An unknown sign-in state is never reported as usable.</p>
+      <div id="auth"></div>
+    </section>
+    <section class="card" aria-labelledby="events-h">
+      <div class="card-head">
+        <h2 id="events-h">Live event stream</h2>
+        <div class="controls">
+          <label for="evt-type">Type</label>
+          <input id="evt-type" type="text" placeholder="route.probe.failed" size="22">
+          <label for="evt-source">Source</label>
+          <input id="evt-source" type="text" placeholder="pi" size="10">
+          <button id="evt-apply" type="button" class="btn">Apply</button>
+          <button id="evt-clear" type="button" class="btn btn-quiet">Clear</button>
+        </div>
+      </div>
+      <div class="tablewrap"><table id="events" class="cards-table"><caption class="sr-only">Recent ingested events</caption></table></div>
+    </section>
+  </div>
 
-  <section class="card" aria-labelledby="sub-h">
-    <h2 id="sub-h">ClinePass subscription tail</h2>
-    <div class="tablewrap"><table id="subscription"><caption class="sr-only">Subscription route status</caption></table></div>
-  </section>
-
-  <section class="split">
+  <div id="view-diagnostics" role="tabpanel" aria-labelledby="tab-diagnostics" hidden>
     <section class="card" aria-labelledby="catalog-h">
       <div class="card-head">
         <h2 id="catalog-h">Catalog evidence</h2>
@@ -74,60 +202,32 @@
       <p class="hint">Catalog membership is <em>capability</em> evidence only. It never proves quota availability.</p>
       <div id="catalog"></div>
     </section>
-    <section class="card" aria-labelledby="auth-h">
-      <h2 id="auth-h">Auth evidence</h2>
-      <p class="hint">Separate from quota and capability. An unknown sign-in state is never reported as usable.</p>
-      <div id="auth"></div>
+    <section class="card" aria-labelledby="goals-h">
+      <h2 id="goals-h">Goals</h2>
+      <div id="goals"></div>
     </section>
-  </section>
+    <section class="card" aria-labelledby="overrides-h">
+      <h2 id="overrides-h">Bounded manual overrides</h2>
+      <p class="hint">A force-skip is explicit, reasoned, expiring and visible. It never fabricates provider evidence.</p>
+      <div id="overrides"></div>
+      <form id="override-form" class="formrow">
+        <label>Account <input name="account_alias" required placeholder="account-1" size="9"></label>
+        <label>Provider <select name="provider"><option value="cline">cline</option><option value="cline-pass">cline-pass</option></select></label>
+        <label>Model <input name="model" required placeholder="cline-free/deepseek-v4.1-flash" size="30"></label>
+        <label>Tier <select name="tier"><option value="free">free</option><option value="subscription">subscription</option></select></label>
+        <label>Reason <input name="reason" required placeholder="why this leg is skipped" size="26"></label>
+        <label>Expires (min) <input name="expires_in_minutes" type="number" min="1" max="720" value="30" size="4"></label>
+        <button type="submit" class="btn btn-warn">Force skip leg</button>
+      </form>
+    </section>
+    <section class="card" aria-labelledby="raw-h">
+      <details>
+        <summary id="raw-h">Raw snapshot (audit, redacted)</summary>
+        <pre id="raw" class="raw"></pre>
+      </details>
+    </section>
+  </div>
 
-  <section class="card" aria-labelledby="quota-h">
-    <h2 id="quota-h">Quota evidence</h2>
-    <p class="hint">Only recorded provider evidence is shown. Reset times that were never observed are labelled <strong>reset unknown</strong> with the bounded next check.</p>
-    <div id="quota"></div>
-  </section>
-
-  <section class="card" aria-labelledby="goals-h">
-    <h2 id="goals-h">Goals</h2>
-    <div id="goals"></div>
-  </section>
-
-  <section class="card" aria-labelledby="events-h">
-    <div class="card-head">
-      <h2 id="events-h">Live event stream</h2>
-      <div class="controls">
-        <label for="evt-type">Type</label>
-        <input id="evt-type" type="text" placeholder="route.probe.failed" size="22">
-        <label for="evt-source">Source</label>
-        <input id="evt-source" type="text" placeholder="pi" size="10">
-        <button id="evt-apply" type="button" class="btn">Apply</button>
-        <button id="evt-clear" type="button" class="btn btn-quiet">Clear</button>
-      </div>
-    </div>
-    <div class="tablewrap"><table id="events"><caption class="sr-only">Recent ingested events</caption></table></div>
-  </section>
-
-  <section class="card" aria-labelledby="overrides-h">
-    <h2 id="overrides-h">Bounded manual overrides</h2>
-    <p class="hint">A force-skip is explicit, reasoned, expiring and visible. It never fabricates provider evidence.</p>
-    <div id="overrides"></div>
-    <form id="override-form" class="formrow">
-      <label>Account <input name="account_alias" required placeholder="account-1" size="9"></label>
-      <label>Provider <select name="provider"><option value="cline">cline</option><option value="cline-pass">cline-pass</option></select></label>
-      <label>Model <input name="model" required placeholder="cline-free/deepseek-v4.1-flash" size="30"></label>
-      <label>Tier <select name="tier"><option value="free">free</option><option value="subscription">subscription</option></select></label>
-      <label>Reason <input name="reason" required placeholder="why this leg is skipped" size="26"></label>
-      <label>Expires (min) <input name="expires_in_minutes" type="number" min="1" max="720" value="30" size="4"></label>
-      <button type="submit" class="btn btn-warn">Force skip leg</button>
-    </form>
-  </section>
-
-  <section class="card" aria-labelledby="raw-h">
-    <details>
-      <summary id="raw-h">Raw snapshot (audit)</summary>
-      <pre id="raw" class="raw"></pre>
-    </details>
-  </section>
 </main>
 
 <footer>

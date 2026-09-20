@@ -23,7 +23,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 MODULES = ("tests.test_cmo_core", "tests.test_cmo_http", "tests.test_cmo_compat")
 PYTEST_FILES = ("tests/test_quarantine_recheck.py", "tests/test_snapshot_truth.py",
-                "tests/test_recheck_worker.py")
+                "tests/test_recheck_worker.py", "tests/test_recheck_probe.py",
+                "tests/test_policy_versions.py", "tests/test_policy_http.py")
 
 for _extra in (str(REPO), str(REPO / "python")):
     if _extra not in sys.path:

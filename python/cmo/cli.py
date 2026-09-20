@@ -62,6 +62,9 @@ def envelope(store: EventStore | None, extra: dict[str, Any] | None = None) -> d
         "state_schema": {"name": SCHEMA_NAME, "version": SCHEMA_VERSION},
     }
     policy = load_canonical_policy()
+    if store is not None:
+        policy, policy_version, _ = store.active_policy_doc()
+        payload["policy_version"] = policy_version
     payload["policy_digest"] = policy_digest(policy)
     if store is not None:
         payload["state_revision"] = store.revision()
@@ -318,6 +321,44 @@ def cmd_quarantine(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 
+def cmd_policy_save(args: argparse.Namespace) -> int:
+    try:
+        doc = json.loads(Path(args.file).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return fail(f"cannot read policy file: {exc}")
+    try:
+        validate_policy(doc)
+    except PolicyError as exc:
+        return fail(f"invalid policy: {exc}")
+    with _open_store(args) as store:
+        try:
+            saved = store.save_policy_version(doc, created_by=args.by,
+                                              note=args.note or "saved via CLI")
+        except EventConflictError as exc:
+            return fail(str(exc))
+        emit(envelope(store, {"ok": True, "result": saved}))
+    return 0
+
+
+def cmd_policy_versions(args: argparse.Namespace) -> int:
+    with _open_store(args) as store:
+        versions = store.policy_versions()
+        _, active_version, _ = store.active_policy_doc()
+        emit(envelope(store, {"ok": True, "versions": versions,
+                              "active_version": active_version}))
+    return 0
+
+
+def cmd_policy_rollback(args: argparse.Namespace) -> int:
+    with _open_store(args) as store:
+        try:
+            saved = store.rollback_policy(args.version, created_by=args.by)
+        except PolicyError as exc:
+            return fail(str(exc))
+        emit(envelope(store, {"ok": True, "result": saved}))
+    return 0
+
+
 def cmd_context_escalate(args: argparse.Namespace) -> int:
     with _open_store(args) as store:
         goal = next((g for g in store.goals() if g["goal_id"] == args.goal_id), None)
@@ -473,6 +514,23 @@ def build_parser() -> argparse.ArgumentParser:
     add_store_args(p)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_quarantine)
+
+    p = sub.add_parser("policy")
+    psub = p.add_subparsers(dest="policy_command", required=True)
+    ps = psub.add_parser("save")
+    add_store_args(ps)
+    ps.add_argument("--file", required=True)
+    ps.add_argument("--note", default="")
+    ps.add_argument("--by", default="cli")
+    ps.set_defaults(func=cmd_policy_save)
+    pv = psub.add_parser("versions")
+    add_store_args(pv)
+    pv.set_defaults(func=cmd_policy_versions)
+    pr = psub.add_parser("rollback")
+    add_store_args(pr)
+    pr.add_argument("--version", type=int, required=True)
+    pr.add_argument("--by", default="cli")
+    pr.set_defaults(func=cmd_policy_rollback)
 
     p = sub.add_parser("context-escalate")
     add_store_args(p)
