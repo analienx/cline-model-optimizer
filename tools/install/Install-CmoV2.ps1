@@ -35,6 +35,15 @@
   install never writes state into InstallRoot. Defaults to a unique TEMP file
   and is retained (never deleted) for audit.
 
+.PARAMETER ProbeCommand
+  Optional raw command line for the real-Pi model probe used by the
+  recheck worker (legacy CMO_PROBE_COMMAND protocol, e.g.
+  'node C:/Workspace/repos/config/tools/pi/pi-model-probe.mjs').
+  Recorded in the plan/receipt and injected as CMO_PROBE_COMMAND into the
+  service launch environment. Empty (default) leaves the probe unconfigured
+  and the worker fails closed with recheck.no_probe_executor.
+  Must not contain shell metacharacters (&|<>) so it can be embedded in the
+  logon launch command.
 .PARAMETER BackupDir
   Backup/audit dir. Defaults to <InstallRoot>\install-logs\backup-<utc stamp>.
 #>
@@ -45,6 +54,7 @@ param(
   [string]$InstallRoot = (Join-Path $env:LOCALAPPDATA 'ClineModelOptimizer'),
   [int]$ServicePort = 4311,
   [string]$ScratchDb = (Join-Path ([System.IO.Path]::GetTempPath()) ('cmo-scratch-' + [System.Guid]::NewGuid().ToString('N') + '.sqlite3')),
+  [string]$ProbeCommand = '',
   [string]$BackupDir = ''
 )
 $ErrorActionPreference = 'Stop'
@@ -143,6 +153,17 @@ if ([string]::IsNullOrWhiteSpace($BackupDir)) {
 }
 $ScratchFull = Resolve-FullPath $ScratchDb
 
+# Optional real-Pi probe command for the recheck worker. Validated BEFORE any
+# mutation; recorded in the plan/receipt. Empty keeps the fail-closed default.
+$probeCommand = $ProbeCommand.Trim()
+if ($probeCommand -ne '') {
+  if ($probeCommand -match '[&|<>^]') { throw 'ProbeCommand must not contain shell metacharacters (&|<>)' }
+  $probeExe = ($probeCommand -split '\s+')[0]
+  if ((-not (Get-Command $probeExe -ErrorAction SilentlyContinue)) -and (-not (Test-Path -LiteralPath $probeExe))) {
+    throw "ProbeCommand executable not found: $probeExe"
+  }
+}
+
 # Drill guard: backup/scratch targets must never resolve into the real tree.
 if ($mode -eq 'drill') {
   foreach ($target in @($BackupFull, $ScratchFull)) {
@@ -178,6 +199,7 @@ $plan = @{
   generatedAt    = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
   installRoot    = $InstallFull
   mode           = $mode
+  probeCommand   = $probeCommand
   scratchDb      = $ScratchFull
   servicePort    = $ServicePort
 }
@@ -285,7 +307,11 @@ if ($mode -eq 'live') {
   $serveTarget = Join-Path $v2Dir 'cmo.pyz'
   $autostart = 'none'
   $startupServicePath = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\ClineModelOptimizer-Service.cmd'
-  $action = New-ScheduledTaskAction -Execute 'python' -Argument "`"$serveTarget`" serve --port $ServicePort --artifact-digest $artifactDigest"
+  if ($probeCommand -ne '') {
+    $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"set CMO_PROBE_COMMAND=$probeCommand && python `"$serveTarget`" serve --port $ServicePort --artifact-digest $artifactDigest`""
+  } else {
+    $action = New-ScheduledTaskAction -Execute 'python' -Argument "`"$serveTarget`" serve --port $ServicePort --artifact-digest $artifactDigest"
+  }
   $trigger = New-ScheduledTaskTrigger -AtLogOn
   try {
     Register-ScheduledTask -TaskName 'ClineModelOptimizer-Service' -Action $action -Trigger $trigger -ErrorAction Stop | Out-Null
@@ -294,7 +320,11 @@ if ($mode -eq 'live') {
     # Non-elevated install: fall back to the user-writable per-user Startup
     # folder, which autostarts the same service at logon without admin rights.
     $startupCmd = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\ClineModelOptimizer-Service.cmd'
-    $cmdText = "@echo off`r`nstart `"`" /b python `"$serveTarget`" serve --port $ServicePort --artifact-digest $artifactDigest`r`n"
+    if ($probeCommand -ne '') {
+      $cmdText = "@echo off`r`nset CMO_PROBE_COMMAND=$probeCommand`r`nstart `"`" /b python `"$serveTarget`" serve --port $ServicePort --artifact-digest $artifactDigest`r`n"
+    } else {
+      $cmdText = "@echo off`r`nstart `"`" /b python `"$serveTarget`" serve --port $ServicePort --artifact-digest $artifactDigest`r`n"
+    }
     [System.IO.File]::WriteAllText($startupServicePath, $cmdText, [System.Text.ASCIIEncoding]::new())
     $autostart = 'startup-folder'
   }
@@ -332,6 +362,7 @@ $receipt = @{
   installRoot    = $InstallFull
   mode           = $mode
   planHash       = $planHash
+  probeCommand   = $probeCommand
   schema         = 'cmo.install-receipt/v1'
   servicePort    = $ServicePort
 }
