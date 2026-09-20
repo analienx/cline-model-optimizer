@@ -50,12 +50,13 @@ function renderRouter(snap){const box=clear($('route-status'));
  text.append(el('strong','',names(route.model)));title.append(position,text);
  const evidence=matrix.get(route.model);const enabled=accounts.filter(a=>route.accounts.includes(a.id));
  let verified=0,cooling=0,needsCheck=0,auth=0;const cells=[];
- for(const account of enabled){const cell=evidence?.accounts?.[account.id],status=cell?.state||'UNKNOWN';let label='Not yet verified',kind='unknown';
+ for(const account of enabled){const cell=evidence?.accounts?.[account.id],status=cell?.state||'UNKNOWN',ready=state.readiness[account.id],free=accountFreeEvidence(snap,account.id);let label=ready?.cline_saved?'Not checked for this model':'Sign-in not checked',kind='unknown';
  if(status==='AVAILABLE'&&cell?.freshness==='fresh'){verified++;label='Verified recently';kind='good';}
  else if(status==='QUOTA'&&(!cell.reset_at||Number(cell.reset_at)>Date.now())){cooling++;label=cell.reset_at?'Quota until '+new Date(cell.reset_at).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}):'Quota exhausted · reset unknown';kind='bad';}
- else if(status==='AUTH_BLOCKED'){auth++;label='Sign-in required';kind='bad';}
+ else if(status==='AUTH_BLOCKED'&&ready?.cline_saved&&free.latest>Number(cell?.observed_at||0)){needsCheck++;label='Older sign-in failure · recheck model';}
+ else if(status==='AUTH_BLOCKED'){auth++;label='Sign-in required for this model';kind='bad';}
  else if(status==='QUOTA_EXPIRED'||status==='QUOTA'&&cell?.reset_at&&Number(cell.reset_at)<=Date.now()){needsCheck++;label='Cooldown passed · needs recheck';}
- else if(status==='AVAILABLE'){needsCheck++;label='Success too old · needs recheck';}
+ else if(status==='AVAILABLE'||status==='STALE'&&cell?.stored_state==='AVAILABLE'){needsCheck++;label='Worked earlier · needs recheck';}
  else if(status==='TRANSIENT'){needsCheck++;label='Temporary provider failure';}
  else if(status==='CAPABILITY_UNAVAILABLE'){label='Model unavailable';kind='bad';}
  const chip=el('span','route-cell '+kind,`${account.id.replace('account-','Account ')} · ${label}`);
@@ -73,13 +74,14 @@ function renderRouter(snap){const box=clear($('route-status'));
    needsCheck?`${needsCheck} of ${enabled.length} need recheck`:'No account availability verified';
  text.append(el('em','',summary));const markers=el('div','route-markers');
  for(const account of enabled){const cell=evidence?.accounts?.[account.id],current=cell?.state;
- const readiness=state.readiness[account.id];const cls=readiness&&!readiness.cline_saved?'unverified':
+ const readiness=state.readiness[account.id];const historicalAuth=current==='AUTH_BLOCKED'&&readiness?.cline_saved&&accountFreeEvidence(snap,account.id).latest>Number(cell?.observed_at||0);
+ const cls=readiness&&!readiness.cline_saved?'unverified':
    current==='AVAILABLE'&&cell?.freshness==='fresh'?'good':
    current==='QUOTA'&&(!cell.reset_at||Number(cell.reset_at)>Date.now())?'bad':
-   current==='AUTH_BLOCKED'?'bad':current==='QUOTA_EXPIRED'?'pending':'unverified';
+   current==='AUTH_BLOCKED'&&!historicalAuth?'bad':current==='QUOTA_EXPIRED'||historicalAuth||current==='STALE'?'pending':'unverified';
  const dot=el('span','route-marker '+cls,account.id.replace('account-','A'));
  dot.title=`${account.id}: ${readiness&&!readiness.cline_saved?'Pi Cline sign-in missing':
-   cls==='good'?'Recently verified':cls==='bad'?'Blocked':cls==='pending'?'Needs recheck':'Unknown'}`;
+   cls==='good'?'Recently verified':cls==='bad'?'Blocked':cls==='pending'?'Needs recheck':'Not checked for this model'}`;
  dot.setAttribute('aria-label',dot.title);markers.append(dot);}
  text.append(markers);const detail=el('details','route-details'),toggle=el('summary','',`Accounts ${enabled.length}  |  Details`),content=el('div','route-expanded');
  if(cells.length)content.append(...cells);else content.append(el('span','muted','No enabled account assigned to this model.'));
@@ -159,19 +161,25 @@ function showSetupFeedback(stage,button,feedback,outcome){
   'Windows clipboard copy failed. The full command is selected below. Press Ctrl+C or use Copy from the selection menu, then paste into PowerShell.';
  feedback.hidden=false;
 }
+function accountFreeEvidence(snap,id){
+ const cells=(snap.free_matrix||[]).map(r=>r.accounts?.[id]).filter(Boolean);
+ const success=cells.filter(c=>c.stored_state==='AVAILABLE'&&c.last_reason_code==='probe.ok');
+ const latest=Math.max(0,...success.map(c=>Number(c.observed_at)||0));
+ return {latest,recent:success.some(c=>c.state==='AVAILABLE'&&c.freshness==='fresh')};
+}
 function renderAccounts(snap){const box=clear($('accounts'));
  const accounts=[...(snap.policy.accounts||[])].sort((a,b)=>(a.priority??0)-(b.priority??0));
  $('account-count').textContent=`${accounts.length} / 5`;const add=accounts.length<5;
  $('new-email').disabled=!add;$('add-account').querySelector('button').disabled=!add;
  for(const [index,account] of accounts.entries()){
  const row=el('div','account-item'),avatar=el('span','account-avatar',String(index+1)),main=el('div','item-main');
- const hasEmail=account.label&&account.label.includes('@');const ready=state.readiness[account.id];
+ const hasEmail=account.label&&account.label.includes('@');const ready=state.readiness[account.id],free=accountFreeEvidence(snap,account.id);
  const profileState=!ready?'Profile not checked':ready.setup_running&&!ready.cline_saved?'Account setup in progress':!ready.profile_exists?'Pi profile missing':
-   !ready.cline_saved?'Pi sign-in missing':'Pi sign-in saved | live login and email unverified';
- const routeState=account.enabled===false?'Not in routing':ready&&!ready.cline_saved?'Enabled in preferences | NOT route-ready':'Enabled in preferences | live route unverified';
+   !ready.cline_saved?'Pi Cline sign-in missing':'Cline Free sign-in saved';
+ const routeState=account.enabled===false?'Not in routing':!ready?.cline_saved?'Not ready for free routing':free.recent?'Free model available · checked recently':free.latest?'Free model worked earlier · recheck due':'Free models need an availability check';
  main.append(el('strong','',hasEmail?account.label:'Email not linked'),el('small','',`${account.id} | ${routeState} | ${profileState}`));
  const pass=el('div','pass-line');const passMessage=!ready?'ClinePass status not checked':!ready.profile_exists?'ClinePass: profile not created':
-   ready.pass_saved?'ClinePass sign-in saved | plan and usage not synced here':'ClinePass not signed in to this Pi profile';
+   ready.pass_saved?'ClinePass sign-in saved | plan and usage not synced here':'ClinePass not connected · optional for free models';
  pass.append(el('span','',passMessage));
  if(ready?.pass_saved){const link=el('a','pass-link','View 5h / weekly / monthly usage');link.href='https://app.cline.bot/dashboard';link.target='_blank';link.rel='noopener noreferrer';link.title='Open Cline dashboard; select this same account to view its live limits';pass.append(link);}
  main.append(pass);
