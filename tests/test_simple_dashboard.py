@@ -88,7 +88,8 @@ class SimpleDashboardTests(PolicyServerCase):
 
 def test_account_onboarding_uses_native_windows_copy_and_manual_fallback():
     source=(Path(__file__).resolve().parents[1]/'python/cmo/web/simple.js').read_text(encoding='utf-8')
-    assert 'Copy sign-in command' in source and 'Copy setup command' in source
+    assert 'Start sign-in on Windows' in source and 'Copy setup command' in source
+    assert '/api/simple/accounts/start-signin' in source
     assert "/api/simple/accounts/copy-command" in source
     assert "document.execCommand('copy')" not in source
     assert 'navigator.clipboard.writeText' not in source

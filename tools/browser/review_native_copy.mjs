@@ -12,9 +12,9 @@ let ws;try{
  await send('Page.enable');await send('Runtime.enable');await send('Page.navigate',{url:base+'/'});
  for(let i=0;i<70;i++){if(await evaluate("document.querySelectorAll('.account-connect-button').length===1"))break;await wait(200);}
  const first=await evaluate("document.querySelector('.account-connect-button')?.textContent");
- await evaluate("document.querySelector('.account-connect-button').click();true");
+ await evaluate("document.querySelector('.account-guide').open=true;document.querySelector('.account-guide-body button').click();true");
  for(let i=0;i<50;i++){if(await evaluate("!document.querySelector('.account-copy-feedback')?.hidden"))break;await wait(200);}
- const result=await evaluate("({label:document.querySelector('.account-connect-button')?.textContent,feedback:document.querySelector('.account-copy-feedback')?.textContent,visible:document.querySelector('.account-guide')?.open,field:document.querySelector('.account-command')?.value?.endsWith('-Account account-4')})");
- const pass=first==='Copy sign-in command'&&result.label==='Copied to Windows'&&result.feedback.includes('Windows text clipboard checked')&&result.field;
+ const result=await evaluate("({label:document.querySelector('.account-guide-body button')?.textContent,feedback:document.querySelector('.account-copy-feedback')?.textContent,visible:document.querySelector('.account-guide')?.open,field:document.querySelector('.account-command')?.value?.endsWith('-Account account-4')})");
+ const pass=first==='Start sign-in on Windows'&&result.label==='Copied to Windows'&&result.feedback.includes('Windows text clipboard checked')&&result.field;
  console.log(JSON.stringify({pass,first,result}));process.exitCode=pass?0:1;
 }catch(e){console.error('NATIVE_COPY_BROWSER_ERROR',String(e));process.exitCode=2;}finally{ws?.close();chrome.kill();}

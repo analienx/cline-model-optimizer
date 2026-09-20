@@ -124,6 +124,21 @@ async function copySetupCommand(id,stage,button,guide,feedback){
   field.focus();field.select();
  }
 }
+async function startAccountSignin(id,button,feedback,guide){
+ button.disabled=true;
+ feedback.hidden=false;feedback.textContent='Opening a Windows sign-in terminal…';
+ try{
+  const result=await send('/api/simple/accounts/start-signin',{id});
+  feedback.textContent=result.already_open?'Your sign-in terminal is already open on Windows. Finish login there, then select Refresh setup.':
+   'Sign-in terminal opened on Windows. Complete the browser login there, then select Refresh setup. Account connection is not verified yet.';
+  button.textContent=result.already_open?'Terminal already open':'Sign-in terminal opened';
+  state.signinHelp={id,message:feedback.textContent};
+ }catch(error){
+  feedback.textContent='Could not open the Windows sign-in terminal: '+error.message+'. Use Copy command instead.';
+  button.textContent='Try opening sign-in again';button.disabled=false;
+  guide.open=true;
+ }
+}
 function showSetupFeedback(stage,button,feedback,outcome){
  button.textContent=outcome==='verified'?'Copied to Windows':'Select command';
  feedback.textContent=outcome==='verified'?'Windows text clipboard checked. Open PowerShell, paste the command and complete sign-in. Then refresh setup.':
@@ -149,17 +164,24 @@ function renderAccounts(snap){const box=clear($('accounts'));
  if(ready&&!ready.cline_saved){
   const stage=ready.profile_exists?'signin':'provision';
   const connect=el('div','account-connect'),label=el('div','connect-label',stage==='signin'?'Next step: sign in to Pi':'Next step: create your Pi profile');
-  const guide=el('details','account-guide'),sum=el('summary','','Show command & instructions'),body=el('div','account-guide-body');
+  const guide=el('details','account-guide'),sum=el('summary','',stage==='signin'?'Copy command instead':'Show command & instructions'),body=el('div','account-guide-body');
   const feedback=el('p','account-copy-feedback');feedback.setAttribute('role','status');feedback.setAttribute('aria-live','polite');feedback.hidden=true;
   const command=el('textarea','account-command');command.value=accountSetupCommand(account.id,stage);command.readOnly=true;command.rows=3;command.spellcheck=false;command.setAttribute('aria-label','Setup command for '+account.id);
-  body.append(el('p','',stage==='signin'?'On your Windows computer, copy this command and run it in PowerShell and complete the browser sign-in using this account.':'On your Windows computer, copy this command and run it in PowerShell. This creates only the isolated profile for this account.'),command);
+  body.append(el('p','',stage==='signin'?'If the sign-in window does not open, use this manual fallback on the Windows computer running CMO.':'On your Windows computer, run this setup command in PowerShell. This creates only the isolated profile for this account.'),command);
   body.append(makeButton('Refresh setup',()=>load(true)));
   body.append(el('p','account-device-note','Copy command writes to the Windows computer running this local dashboard, not to your phone clipboard.'));
   body.append(el('p','account-setup-hint',stage==='signin'?'A saved sign-in does not prove the email identity or free-model quota. Check availability separately.':'Once the profile is created, Refresh setup will show the separate sign-in step.'));
   guide.append(sum,body);
-  const button=makeButton(stage==='signin'?'Copy sign-in command':'Copy setup command',()=>copySetupCommand(account.id,stage,button,guide,feedback));
+  const button=makeButton(stage==='signin'?'Start sign-in on Windows':'Copy setup command',
+   ()=>stage==='signin'?startAccountSignin(account.id,button,feedback,guide):copySetupCommand(account.id,stage,button,guide,feedback));
+  if(stage==='signin')body.insertBefore(makeButton('Copy command',()=>copySetupCommand(account.id,stage,copyButton,guide,feedback)),command);
+  const copyButton=stage==='signin'?body.querySelector('button'):null;
   button.classList.add('primary','account-connect-button');button.setAttribute('aria-label',`${button.textContent} for ${account.id}`);
-  if(state.setupHelp?.id===account.id&&state.setupHelp.stage===stage){guide.open=true;showSetupFeedback(stage,button,feedback,state.setupHelp.outcome);}
+  if(state.signinHelp?.id===account.id&&stage==='signin'){
+   feedback.hidden=false;feedback.textContent=state.signinHelp.message;button.textContent='Sign-in terminal requested';
+  }else if(state.setupHelp?.id===account.id&&state.setupHelp.stage===stage){
+   guide.open=true;showSetupFeedback(stage,stage==='signin'?copyButton:button,feedback,state.setupHelp.outcome);
+  }
 
   connect.append(label,button,feedback,guide);main.append(connect);
  }

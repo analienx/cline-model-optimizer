@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 from . import SCHEMA_NAME, SCHEMA_VERSION, __version__
 from .catalog import DEFAULT_CATALOG_URL, refresh_catalog, fetch_catalog
 from .account_clipboard import command_for, copy_native_text
+from .account_signin import launch_account_signin
 from .db import connect, get_meta
 from .events import EventStore, EventValidationError, EventConflictError, ms_to_iso
 from .recheck import RecheckWorker
@@ -45,6 +46,8 @@ class Service:
         self.catalog_url = catalog_url
         self.started_at = int(time.time() * 1000)
         self.pid = os.getpid()
+        self.login_lock = threading.Lock()
+        self.login_processes = {}
 
     def state_root(self) -> Path:
         parent = self.db_path.parent
@@ -220,6 +223,8 @@ class CmoHandler(BaseHTTPRequestHandler):
                 self._resume_goal(body)
             elif path == "/api/simple/accounts/copy-command":
                 self._copy_account_command(body)
+            elif path == "/api/simple/accounts/start-signin":
+                self._start_account_signin(body)
             elif path == "/api/simple/models":
                 self._save_simple_models(body)
             elif path == "/api/policy":
@@ -562,6 +567,55 @@ class CmoHandler(BaseHTTPRequestHandler):
         self._json(200 if copied else 503,
                    {"ok": copied, "confirmed": copied,
                     "message": "Windows clipboard verified" if copied else "Windows clipboard unavailable"})
+
+    def _start_account_signin(self, body: Any) -> None:
+        """Launch the isolated Pi sign-in terminal on an explicit same-origin click."""
+        origin = self.headers.get("Origin", "")
+        host = self.headers.get("Host", "")
+        if (not origin or origin.lower() != ("http://" + host).lower()
+                or self.headers.get("Content-Type", "").split(";")[0].lower() != "application/json"
+                or self.headers.get("Sec-Fetch-Site", "same-origin") != "same-origin"):
+            self._json(403, {"error": "same-origin JSON request required"})
+            return
+        if not isinstance(body, dict) or set(body) != {"id"}:
+            raise EventValidationError("invalid sign-in request")
+        account = body["id"]
+        from .account_clipboard import ACCOUNT
+        if not isinstance(account, str) or not ACCOUNT.fullmatch(account):
+            raise EventValidationError("invalid account alias")
+        with self.service.store() as store:
+            policy, _, _ = store.active_policy_doc()
+        matches = [a for a in policy.get("accounts", []) if a.get("id") == account]
+        if len(matches) != 1 or matches[0].get("profile", account) != account:
+            raise EventValidationError("unknown account")
+        root = Path(os.environ.get("PI_PROFILE_ROOT", "").strip() or
+                    str(Path.home() / ".pi" / "supervisor-accounts"))
+        agent = root / account / "agent"
+        if not agent.is_dir():
+            self._json(409, {"error": "Pi profile missing; refresh setup"})
+            return
+        auth = agent / "auth.json"
+        try:
+            saved = json.loads(auth.read_text(encoding="utf-8")) if auth.is_file() else {}
+        except (OSError, ValueError, UnicodeError):
+            saved = {}
+        if isinstance(saved, dict) and isinstance(saved.get("cline"), dict):
+            self._json(409, {"error": "Pi sign-in already saved; refresh setup"})
+            return
+        with self.service.login_lock:
+            existing = self.service.login_processes.get(account)
+            if existing is not None and existing.poll() is None:
+                self._json(202, {"ok": True, "started": False, "already_open": True,
+                                 "message": "Sign-in terminal already open on Windows"})
+                return
+            try:
+                process = launch_account_signin(account)
+            except (OSError, ValueError, FileNotFoundError):
+                self._json(503, {"error": "Windows sign-in terminal unavailable; use Copy command"})
+                return
+            self.service.login_processes[account] = process
+        self._json(202, {"ok": True, "started": True, "already_open": False,
+                         "message": "Sign-in terminal opened on Windows; complete login there"})
 
     def _simple_account_readiness(self) -> None:
         """Local Pi profile hints only: credential presence is not live login or entitlement."""
