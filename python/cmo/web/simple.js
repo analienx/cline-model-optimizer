@@ -108,12 +108,36 @@ function accountSetupCommand(id,stage){
  return 'powershell -NoProfile -File "' + String.raw`C:\Workspace\repos\config\tools\pi` + '\\' + helper + '" -Account ' + id;
 }
 async function copySetupCommand(id,stage,button,guide,feedback){
- const command=accountSetupCommand(id,stage);let copied=false;
- try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(command);copied=true;}}catch{}
- if(!copied){const input=el('textarea');input.value=command;input.setAttribute('aria-hidden','true');input.style.cssText='position:fixed;top:0;left:-9999px';document.body.append(input);input.select();try{copied=document.execCommand('copy')===true;}catch{}input.remove();}
- guide.open=true;state.setupHelp={id,stage,copied};
- if(copied){button.textContent='Copied!';guide.querySelector('summary').textContent='What was copied?';feedback.textContent='Copied to this device. On your Windows computer, open PowerShell, paste and press Enter. '+(stage==='provision'?'Then select Refresh setup below.':'Finish the browser sign-in with this account, then select Refresh setup below.');}
- else{button.textContent='Copy command';feedback.textContent='Clipboard access was blocked. Select and copy the command below manually.';}
+ const command=accountSetupCommand(id,stage);
+ guide.open=true;
+ const field=guide.querySelector('.account-command');
+ let outcome='manual';let attempted=false;
+ try{
+  if(navigator.clipboard?.writeText){
+   attempted=true;
+   await navigator.clipboard.writeText(command);
+   if(navigator.clipboard.readText){
+    try{outcome=(await navigator.clipboard.readText())===command?'verified':'manual';}
+    catch{outcome='unconfirmed';}
+   }else outcome='unconfirmed';
+  }
+ }catch{}
+ if(outcome==='manual'&&attempted===false){
+  field.focus();field.select();
+  try{if(document.execCommand('copy')===true)outcome='unconfirmed';}catch{}
+ }
+ state.setupHelp={id,stage,outcome};
+ showSetupFeedback(stage,button,feedback,outcome);
+ if(outcome!=='verified'){
+  guide.querySelector('summary').textContent='Command & manual copy';
+  field.focus();field.select();
+ }
+}
+function showSetupFeedback(stage,button,feedback,outcome){
+ button.textContent=outcome==='verified'?'Copied & checked':outcome==='unconfirmed'?'Copy requested':'Select command';
+ feedback.textContent=outcome==='verified'?'Clipboard text checked. Paste in PowerShell on this Windows computer, then complete sign-in and refresh setup.':
+  outcome==='unconfirmed'?'Browser could not confirm the clipboard. Try pasting in PowerShell; if it is missing, select the command below and press Ctrl+C.':
+  'Automatic copy was not confirmed. The command below is selected: press Ctrl+C on Windows, or use Copy from the text selection menu on mobile.';
  feedback.hidden=false;
 }
 function renderAccounts(snap){const box=clear($('accounts'));
@@ -137,14 +161,16 @@ function renderAccounts(snap){const box=clear($('accounts'));
   const connect=el('div','account-connect'),label=el('div','connect-label',stage==='signin'?'Next step: sign in to Pi':'Next step: create your Pi profile');
   const guide=el('details','account-guide'),sum=el('summary','','Show command & instructions'),body=el('div','account-guide-body');
   const feedback=el('p','account-copy-feedback');feedback.setAttribute('role','status');feedback.setAttribute('aria-live','polite');feedback.hidden=true;
-  const command=el('code','account-command',accountSetupCommand(account.id,stage));command.tabIndex=0;
-  body.append(el('p','',stage==='signin'?'On your Windows computer, run the copied command in PowerShell and complete the browser sign-in using this account.':'On your Windows computer, run the copied command in PowerShell. This creates only the isolated profile for this account.'),command);
+  const command=el('textarea','account-command');command.value=accountSetupCommand(account.id,stage);command.readOnly=true;command.rows=3;command.spellcheck=false;command.setAttribute('aria-label','Setup command for '+account.id);
+  body.append(el('p','',stage==='signin'?'On your Windows computer, copy this command and run it in PowerShell and complete the browser sign-in using this account.':'On your Windows computer, copy this command and run it in PowerShell. This creates only the isolated profile for this account.'),command);
   body.append(makeButton('Refresh setup',()=>load(true)));
+  body.append(el('p','account-device-note','Clipboard actions affect this browser device only. If you are viewing the dashboard on a phone, open it on Windows to paste into Windows PowerShell.'));
   body.append(el('p','account-setup-hint',stage==='signin'?'A saved sign-in does not prove the email identity or free-model quota. Check availability separately.':'Once the profile is created, Refresh setup will show the separate sign-in step.'));
   guide.append(sum,body);
   const button=makeButton(stage==='signin'?'Copy sign-in command':'Copy setup command',()=>copySetupCommand(account.id,stage,button,guide,feedback));
   button.classList.add('primary','account-connect-button');button.setAttribute('aria-label',`${button.textContent} for ${account.id}`);
-  if(state.setupHelp?.id===account.id&&state.setupHelp.stage===stage){guide.open=true;if(state.setupHelp.copied){button.textContent='Copied!';sum.textContent='What was copied?';feedback.textContent='Copied to this device. On your Windows computer, open PowerShell, paste and press Enter. '+(stage==='provision'?'Then select Refresh setup below.':'Finish the browser sign-in, then select Refresh setup below.');}else feedback.textContent='Clipboard access was blocked. Select and copy the command below manually.';feedback.hidden=false;}
+  if(state.setupHelp?.id===account.id&&state.setupHelp.stage===stage){guide.open=true;showSetupFeedback(stage,button,feedback,state.setupHelp.outcome);}
+
   connect.append(label,button,feedback,guide);main.append(connect);
  }
  const manage=el('details','account-actions'),summary=el('summary','','Manage'),menu=el('div','account-menu');summary.setAttribute('aria-label','Manage '+account.id);

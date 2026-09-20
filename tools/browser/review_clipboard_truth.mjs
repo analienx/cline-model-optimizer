@@ -1,0 +1,21 @@
+import {spawn} from 'node:child_process';
+import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
+const base=process.argv[2]||'http://127.0.0.1:4391';
+const port=9693,sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const chrome=spawn('C:/Program Files/Google/Chrome/Application/chrome.exe',['--headless=new','--no-first-run','--disable-extensions',`--remote-debugging-port=${port}`,`--user-data-dir=${fs.mkdtempSync(path.join(os.tmpdir(),'cmo-clipboard-truth-'))}`,'about:blank'],{stdio:'ignore'});
+let ws;try{
+ for(let i=0;i<80;i++){try{if((await fetch(`http://127.0.0.1:${port}/json/version`)).ok)break;}catch{}await sleep(150);}
+ const target=await(await fetch(`http://127.0.0.1:${port}/json/new?${encodeURIComponent(base+'/')}`,{method:'PUT'})).json();
+ ws=new WebSocket(target.webSocketDebuggerUrl);await new Promise((resolve,reject)=>{ws.addEventListener('open',resolve,{once:true});ws.addEventListener('error',reject,{once:true});});
+ let id=0;const pending=new Map();ws.addEventListener('message',e=>{const m=JSON.parse(e.data);if(pending.has(m.id)){const [resolve,reject]=pending.get(m.id);pending.delete(m.id);m.error?reject(Error(JSON.stringify(m.error))):resolve(m.result);}});
+ const send=(method,params={})=>new Promise((resolve,reject)=>{const i=++id;pending.set(i,[resolve,reject]);ws.send(JSON.stringify({id:i,method,params}));});
+ const evaluate=async expression=>{const x=await send('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true});if(x.exceptionDetails)throw Error(x.exceptionDetails.text);return x.result.value;};
+ await send('Page.enable');await send('Runtime.enable');await send('Page.navigate',{url:base+'/'});
+ for(let i=0;i<60;i++){if(await evaluate("document.querySelectorAll('.account-item').length===4"))break;await sleep(150);}
+ const before=await evaluate("({buttons:document.querySelectorAll('.account-connect-button').length,button:document.querySelector('.account-connect-button')?.textContent,field:document.querySelector('.account-command')?.value,readOnly:document.querySelector('.account-command')?.readOnly})");
+ const action=async mode=>evaluate(`(async()=>{window.__copy='';Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.__copy=text;${mode==='blocked'?"throw Error('denied')":''}},readText:async()=>${mode==='match'?"window.__copy":"'other text'"}}});document.querySelector('.account-connect-button').click();await new Promise(r=>setTimeout(r,70));const b=document.querySelector('.account-connect-button'),f=document.querySelector('.account-command');return {button:b.textContent,message:document.querySelector('.account-copy-feedback').textContent,selected:f.selectionStart===0&&f.selectionEnd===f.value.length,field:f.value,open:document.querySelector('.account-guide').open,written:window.__copy};})()`);
+ const wrong=await action('mismatch');const verified=await action('match');const denied=await action('blocked');
+ const legacy=await evaluate(`(async()=>{Object.defineProperty(navigator,'clipboard',{configurable:true,value:undefined});document.execCommand=()=>true;document.querySelector('.account-connect-button').click();await new Promise(r=>setTimeout(r,70));return {label:document.querySelector('.account-connect-button').textContent,message:document.querySelector('.account-copy-feedback').textContent,selected:document.querySelector('.account-command').selectionEnd===document.querySelector('.account-command').value.length};})()`);
+ const pass=legacy.label==='Copy requested'&&legacy.selected&&before.buttons===1&&before.readOnly&&before.field.endsWith('-Account account-4')&&wrong.button!=='Copied & checked'&&wrong.selected&&verified.button==='Copied & checked'&&verified.written===before.field&&denied.button==='Select command'&&denied.selected&&denied.open&&denied.message.includes('Ctrl+C');
+ console.log(JSON.stringify({pass,before:{...before,field:before.field.slice(-20)},wrong:{...wrong,field:wrong.field.slice(-20),written:wrong.written.slice(-20)},verified:{...verified,field:verified.field.slice(-20),written:verified.written.slice(-20)},denied:{...denied,field:denied.field.slice(-20),written:denied.written.slice(-20)},legacy},null,2));process.exitCode=pass?0:1;
+}catch(e){console.error('CLIPBOARD_BROWSER_ERROR '+String(e));process.exitCode=2;}finally{ws?.close();chrome.kill();}
