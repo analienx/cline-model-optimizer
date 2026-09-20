@@ -112,6 +112,37 @@ def test_run_probe_nonzero_exit_is_blocked(monkeypatch: pytest.MonkeyPatch):
     assert result["reason"] == "probe.exit_3"
 
 
+def test_run_probe_nonzero_exit_with_status_json_settles(monkeypatch: pytest.MonkeyPatch):
+    # The canonical probe exits 1 for every classified non-healthy outcome
+    # while still printing the trailing JSON status line; the worker must
+    # settle by mapping, not park as blocked.
+    calls: list = []
+    body = json.dumps({"provider": "cline", "model": "m1", "status": "quota",
+                       "detail": "429 daily free limit", "resetAfterMs": 42000000})
+    _install_probe(monkeypatch, _Proc(1, stdout=f"noise\n{body}\n"), calls)
+    result = run_probe("account-1|cline|m1|free")
+    assert result["outcome"] == "failed"
+    assert result["reason"] == "quota.probe_confirmed"
+    assert result["reset_after_ms"] == 42000000
+
+
+def test_run_probe_nonzero_exit_auth_json_settles(monkeypatch: pytest.MonkeyPatch):
+    calls: list = []
+    body = json.dumps({"status": "auth", "detail": "login required"})
+    _install_probe(monkeypatch, _Proc(1, stdout=body), calls)
+    result = run_probe("account-1|cline|m1|free")
+    assert result["outcome"] == "failed"
+    assert result["reason"] == "auth.probe_failed"
+
+
+def test_run_probe_nonzero_exit_unparseable_stays_blocked(monkeypatch: pytest.MonkeyPatch):
+    calls: list = []
+    _install_probe(monkeypatch, _Proc(1, stdout="traceback noise\n", stderr=""), calls)
+    result = run_probe("account-1|cline|m1|free")
+    assert result["outcome"] == "blocked"
+    assert result["reason"] == "probe.exit_1"
+
+
 def test_run_probe_timeout_is_blocked(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("PI_MODEL_PROBE", "/x/probe")
 
