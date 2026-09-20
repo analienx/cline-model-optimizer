@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CMO trustworthy status</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to status content</a>
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true">CMO</span>
+    <div>
+      <h1>Trustworthy model &amp; account status</h1>
+      <p class="sub">Cline Model Optimizer v2 — sole routing, account and model status authority. Free-first, ClinePass subscription fallback, never pay-as-you-go.</p>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div id="stream" class="pill pill-unknown" role="status" aria-live="polite">connecting…</div>
+    <button id="refresh" type="button" class="btn">Refresh now</button>
+  </div>
+</header>
+
+<div id="banner" class="banner" role="alert" hidden></div>
+
+<main id="main" tabindex="-1">
+
+  <section class="card" aria-labelledby="vitals-h">
+    <h2 id="vitals-h">Service &amp; evidence freshness</h2>
+    <div class="vitals" id="vitals"></div>
+  </section>
+
+  <section class="card" aria-labelledby="decision-h">
+    <div class="card-head">
+      <h2 id="decision-h">Route decision</h2>
+      <div class="controls">
+        <label for="strategy">Strategy</label>
+        <select id="strategy">
+          <option value="free-first">free-first (free ladder → subscription tail)</option>
+          <option value="standard">standard (subscription only)</option>
+          <option value="muse-flash">muse-flash</option>
+          <option value="glm-flash">glm-flash</option>
+          <option value="deepseek-flash">deepseek-flash</option>
+        </select>
+        <label for="goal-select">Goal</label>
+        <select id="goal-select"><option value="">auto (most recent active)</option></select>
+      </div>
+    </div>
+    <div id="decision" class="decision"></div>
+    <div id="skipped"></div>
+  </section>
+
+  <section class="card" aria-labelledby="matrix-h">
+    <div class="card-head">
+      <h2 id="matrix-h">Pi free route matrix (model-major × account)</h2>
+      <p class="hint">A leg counts as usable only from recorded evidence for that exact account, provider, model and tier. Blank legs stay <strong>Unknown</strong>.</p>
+    </div>
+    <div class="tablewrap"><table id="free-matrix"><caption class="sr-only">Free route status per model and account</caption></table></div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <section class="card" aria-labelledby="sub-h">
+    <h2 id="sub-h">ClinePass subscription tail</h2>
+    <div class="tablewrap"><table id="subscription"><caption class="sr-only">Subscription route status</caption></table></div>
+  </section>
+
+  <section class="split">
+    <section class="card" aria-labelledby="catalog-h">
+      <div class="card-head">
+        <h2 id="catalog-h">Catalog evidence</h2>
+        <button id="refresh-catalog" type="button" class="btn">Refresh catalog</button>
+      </div>
+      <p class="hint">Catalog membership is <em>capability</em> evidence only. It never proves quota availability.</p>
+      <div id="catalog"></div>
+    </section>
+    <section class="card" aria-labelledby="auth-h">
+      <h2 id="auth-h">Auth evidence</h2>
+      <p class="hint">Separate from quota and capability. An unknown sign-in state is never reported as usable.</p>
+      <div id="auth"></div>
+    </section>
+  </section>
+
+  <section class="card" aria-labelledby="quota-h">
+    <h2 id="quota-h">Quota evidence</h2>
+    <p class="hint">Only recorded provider evidence is shown. Reset times that were never observed are labelled <strong>reset unknown</strong> with the bounded next check.</p>
+    <div id="quota"></div>
+  </section>
+
+  <section class="card" aria-labelledby="goals-h">
+    <h2 id="goals-h">Goals</h2>
+    <div id="goals"></div>
+  </section>
+
+  <section class="card" aria-labelledby="events-h">
+    <div class="card-head">
+      <h2 id="events-h">Live event stream</h2>
+      <div class="controls">
+        <label for="evt-type">Type</label>
+        <input id="evt-type" type="text" placeholder="route.probe.failed" size="22">
+        <label for="evt-source">Source</label>
+        <input id="evt-source" type="text" placeholder="pi" size="10">
+        <button id="evt-apply" type="button" class="btn">Apply</button>
+        <button id="evt-clear" type="button" class="btn btn-quiet">Clear</button>
+      </div>
+    </div>
+    <div class="tablewrap"><table id="events"><caption class="sr-only">Recent ingested events</caption></table></div>
+  </section>
+
+  <section class="card" aria-labelledby="overrides-h">
+    <h2 id="overrides-h">Bounded manual overrides</h2>
+    <p class="hint">A force-skip is explicit, reasoned, expiring and visible. It never fabricates provider evidence.</p>
+    <div id="overrides"></div>
+    <form id="override-form" class="formrow">
+      <label>Account <input name="account_alias" required placeholder="account-1" size="9"></label>
+      <label>Provider <select name="provider"><option value="cline">cline</option><option value="cline-pass">cline-pass</option></select></label>
+      <label>Model <input name="model" required placeholder="cline-free/deepseek-v4.1-flash" size="30"></label>
+      <label>Tier <select name="tier"><option value="free">free</option><option value="subscription">subscription</option></select></label>
+      <label>Reason <input name="reason" required placeholder="why this leg is skipped" size="26"></label>
+      <label>Expires (min) <input name="expires_in_minutes" type="number" min="1" max="720" value="30" size="4"></label>
+      <button type="submit" class="btn btn-warn">Force skip leg</button>
+    </form>
+  </section>
+
+  <section class="card" aria-labelledby="raw-h">
+    <details>
+      <summary id="raw-h">Raw snapshot (audit)</summary>
+      <pre id="raw" class="raw"></pre>
+    </details>
+  </section>
+</main>
+
+<footer>
+  <span id="footer-state"></span>
+</footer>
+<script src="/app.js"></script>
+</body>
+</html>
