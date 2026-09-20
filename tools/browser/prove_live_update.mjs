@@ -152,16 +152,19 @@ async function main() {
     if (before && before.state === "AVAILABLE") failures.push(`route ${ROUTE_KEY} was already AVAILABLE before the event`);
 
     const occurredAt = Date.now();
+    // Derive the leg from the watched route key so the event is about the
+    // exact cell under test (route identity: account|provider|model|tier).
+    const [routeAccount, routeProvider, routeModel, routeTier] = ROUTE_KEY.split("|");
     const event = {
       event_type: "route.probe.succeeded",
       occurred_at: occurredAt,
       source_component: "browser-acceptance",
       reason_code: "probe.ok",
       safe_detail: "independent browser acceptance probe (synthesized evidence)",
-      account_alias: "account-2",
-      provider: "cline",
-      model: "cline-free/muse-spark-1.3-contributor",
-      tier: "free",
+      account_alias: routeAccount,
+      provider: routeProvider,
+      model: routeModel,
+      tier: routeTier,
       event_id: `browser-acceptance-${occurredAt}`,
     };
     const post = await fetch(`${BASE}/api/events`, {
