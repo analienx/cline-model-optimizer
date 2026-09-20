@@ -2,6 +2,10 @@
 *.user
 .DS_Store
 Thumbs.db
+dist/
+artifacts/
+__pycache__/
+*.pyc
 src/free-models.json
 src/guardian-state.json
 src/guardian-status.json
