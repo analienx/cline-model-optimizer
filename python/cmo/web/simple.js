@@ -69,7 +69,7 @@ function renderRouter(snap){const box=clear($('route-status'));
  row.classList.add(severity);
  let summary=verified?`${verified} of ${enabled.length} accounts recently verified`:
    cooling===enabled.length&&enabled.length?`All ${enabled.length} accounts quota-blocked`:
-   unavailable?`${unavailable} of ${enabled.length} accounts blocked ? others need checking`:
+   unavailable?`${unavailable} of ${enabled.length} accounts blocked | others need checking`:
    needsCheck?`${needsCheck} of ${enabled.length} need recheck`:'No account availability verified';
  text.append(el('em','',summary));const markers=el('div','route-markers');
  for(const account of enabled){const cell=evidence?.accounts?.[account.id],current=cell?.state;
@@ -81,7 +81,7 @@ function renderRouter(snap){const box=clear($('route-status'));
  dot.title=`${account.id}: ${readiness&&!readiness.cline_saved?'Pi Cline sign-in missing':
    cls==='good'?'Recently verified':cls==='bad'?'Blocked':cls==='pending'?'Needs recheck':'Unknown'}`;
  dot.setAttribute('aria-label',dot.title);markers.append(dot);}
- text.append(markers);const detail=el('details','route-details'),toggle=el('summary','',`Accounts ${enabled.length}  ?  Details`),content=el('div','route-expanded');
+ text.append(markers);const detail=el('details','route-details'),toggle=el('summary','',`Accounts ${enabled.length}  |  Details`),content=el('div','route-expanded');
  if(cells.length)content.append(...cells);else content.append(el('span','muted','No enabled account assigned to this model.'));
  detail.append(toggle,content);row.append(title,detail);box.append(row);}
  $('routing-summary').textContent=allVerified?`${allVerified} of ${allRoutes} account-model routes verified recently`:`No free route verified now · ${allCooling} cooling down · ${allExpired} ready to recheck`;
@@ -110,13 +110,13 @@ function renderAccounts(snap){const box=clear($('accounts'));
  const row=el('div','account-item'),avatar=el('span','account-avatar',String(index+1)),main=el('div','item-main');
  const hasEmail=account.label&&account.label.includes('@');const ready=state.readiness[account.id];
  const profileState=!ready?'Profile not checked':!ready.profile_exists?'Pi profile missing':
-   !ready.cline_saved?'Pi sign-in missing':'Pi sign-in saved ? live login and email unverified';
- const routeState=account.enabled===false?'Not in routing':ready&&!ready.cline_saved?'Enabled in preferences ? NOT route-ready':'Enabled for routing';
- main.append(el('strong','',hasEmail?account.label:'Email not linked'),el('small','',`${account.id} ? ${routeState} ? ${profileState}`));
+   !ready.cline_saved?'Pi sign-in missing':'Pi sign-in saved | live login and email unverified';
+ const routeState=account.enabled===false?'Not in routing':ready&&!ready.cline_saved?'Enabled in preferences | NOT route-ready':'Enabled in preferences | live route unverified';
+ main.append(el('strong','',hasEmail?account.label:'Email not linked'),el('small','',`${account.id} | ${routeState} | ${profileState}`));
  const pass=el('div','pass-line');const passMessage=!ready?'ClinePass status not checked':!ready.profile_exists?'ClinePass: profile not created':
-   ready.pass_saved?'ClinePass sign-in saved ? plan and usage not synced here':'ClinePass not signed in to this Pi profile';
+   ready.pass_saved?'ClinePass sign-in saved | plan and usage not synced here':'ClinePass not signed in to this Pi profile';
  pass.append(el('span','',passMessage));
- if(ready?.pass_saved){const link=el('a','pass-link','View 5h / week / month limits ?');link.href='https://app.cline.bot/dashboard';link.target='_blank';link.rel='noopener noreferrer';link.title='Open Cline dashboard; select this same account to view its live limits';pass.append(link);}
+ if(ready?.pass_saved){const link=el('a','pass-link','View 5h / weekly / monthly usage');link.href='https://app.cline.bot/dashboard';link.target='_blank';link.rel='noopener noreferrer';link.title='Open Cline dashboard; select this same account to view its live limits';pass.append(link);}
  main.append(pass);
  if(ready&&!ready.cline_saved){const guide=el('details','account-guide'),sum=el('summary','','How to connect this account');const body=el('div','account-guide-body');
  if(!ready.profile_exists){body.append(el('p','',`1. Create the isolated Pi profile for ${account.id} using this scoped command. It will not copy credentials or affect existing profiles:`));
