@@ -283,9 +283,22 @@ try {
 
 if ($mode -eq 'live') {
   $serveTarget = Join-Path $v2Dir 'cmo.pyz'
+  $autostart = 'none'
+  $startupServicePath = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\ClineModelOptimizer-Service.cmd'
   $action = New-ScheduledTaskAction -Execute 'python' -Argument "`"$serveTarget`" serve --port $ServicePort --artifact-digest $artifactDigest"
   $trigger = New-ScheduledTaskTrigger -AtLogOn
-  Register-ScheduledTask -TaskName 'ClineModelOptimizer-Service' -Action $action -Trigger $trigger -Force | Out-Null
+  try {
+    Register-ScheduledTask -TaskName 'ClineModelOptimizer-Service' -Action $action -Trigger $trigger -ErrorAction Stop | Out-Null
+    $autostart = 'scheduled-task'
+  } catch {
+    # Non-elevated install: fall back to the user-writable per-user Startup
+    # folder, which autostarts the same service at logon without admin rights.
+    $startupCmd = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\ClineModelOptimizer-Service.cmd'
+    $cmdText = "@echo off`r`nstart `"`" /b `"`"%LOCALAPPDATA%\ClineModelOptimizer\v2\cmo.pyz`"`" serve --port $ServicePort`r\n"
+    $cmdText = "@echo off`r`nstart `"`" /b python `"$serveTarget`" serve --port $ServicePort --artifact-digest $artifactDigest`r\n"
+    [System.IO.File]::WriteAllText($startupServicePath, $cmdText, [System.Text.ASCIIEncoding]::new())
+    $autostart = 'startup-folder'
+  }
   # Retire the legacy guardian writer. The observed legacy task name is
   # ClineModelOptimizer-Guardian; CmoGuardian* covers the v2-era variant.
   foreach ($guardianPattern in @('ClineModelOptimizer-Guardian', 'CmoGuardian*')) {
@@ -297,9 +310,10 @@ if ($mode -eq 'live') {
   [System.IO.File]::WriteAllText($dashboardShortcutPath, $shortcutText,
     [System.Text.ASCIIEncoding]::new())
   $shortcutWritten = $true
-  Write-Host 'live host tasks registered; legacy guardian writer retired; dashboard shortcut written'
+  Write-Host "live host tasks registered (autostart=$autostart); legacy guardian writer retired; dashboard shortcut written"
 } else {
   $shortcutWritten = $false
+  $autostart = 'drill-skipped'
   Write-Host 'drill mode: no tasks/services/shortcuts registered; real tree untouched'
 }
 
@@ -309,6 +323,7 @@ if ($mode -eq 'live') {
 
 $receipt = @{
   artifactDigest               = $artifactDigest
+  autostart                    = $autostart
   backupDir                    = $BackupFull
   dashboardShortcut            = $dashboardShortcutPath
   dashboardShortcutBackup      = $shortcutBackupRel
