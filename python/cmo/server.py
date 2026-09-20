@@ -19,10 +19,11 @@ from urllib.parse import parse_qs, urlparse
 
 from . import SCHEMA_NAME, SCHEMA_VERSION, __version__
 from .catalog import DEFAULT_CATALOG_URL, refresh_catalog
-from .recheck import RecheckWorker
 from .db import connect, get_meta
 from .events import EventStore, EventValidationError, EventConflictError, ms_to_iso
-from .policy import load_canonical_policy, policy_digest
+from .recheck import RecheckWorker
+from .policy import (ALIAS_RE, PolicyError, load_canonical_policy, policy_digest,
+                     validate_policy)
 from .snapshot import build_snapshot
 
 MAX_BODY_BYTES = 1024 * 1024
@@ -164,6 +165,11 @@ class CmoHandler(BaseHTTPRequestHandler):
             with self.service.store() as store:
                 self._json(200, {"schema": "cmo.recheck/v1",
                                  "requests": store.recheck_requests()})
+        elif path == "/api/policy/versions":
+            with self.service.store() as store:
+                self._json(200, {"schema": "cmo.policy/v1",
+                                 "versions": store.policy_versions(),
+                                 "active": store.active_policy_doc()[1:]})
         elif path == "/api/stream":
             self._handle_stream()
         else:
@@ -189,6 +195,12 @@ class CmoHandler(BaseHTTPRequestHandler):
                 self._request_recheck(body)
             elif path == "/api/override":
                 self._create_override(body)
+            elif path == "/api/policy":
+                self._save_policy(body)
+            elif path == "/api/policy/rollback":
+                self._rollback_policy(body)
+            elif path == "/api/accounts":
+                self._mutate_account(body)
             else:
                 self._json(404, {"error": "not found", "path": path})
         except EventConflictError as exc:
@@ -404,6 +416,327 @@ class CmoHandler(BaseHTTPRequestHandler):
                 "safe_detail": reason,
             })
             self._json(200, {"ok": True, "result": result})
+
+    # -- versioned policy + accounts ------------------------------------
+
+    @staticmethod
+    def _policy_diff(old: dict[str, Any], new: dict[str, Any]) -> list[dict[str, Any]]:
+        """Derive account audit events from a policy edit (no mutation)."""
+        old_accounts = {a.get("id"): a for a in (old.get("accounts") or [])
+                        if isinstance(a, dict)}
+        new_accounts = {a.get("id"): a for a in (new.get("accounts") or [])
+                        if isinstance(a, dict)}
+        now = int(time.time() * 1000)
+        audits: list[dict[str, Any]] = []
+        for alias in sorted(set(new_accounts) - set(old_accounts)):
+            entry = new_accounts[alias]
+            audits.append({
+                "event_type": "account.added", "occurred_at": now,
+                "source_component": "ui", "account_alias": alias,
+                "reason_code": "account.added",
+                "safe_detail": (f"account {alias} registered "
+                                  f"(priority {entry.get('priority', '?')}, "
+                                  f"{'enabled' if entry.get('enabled', True) else 'disabled'})"),
+            })
+        for alias in sorted(set(old_accounts) - set(new_accounts)):
+            audits.append({
+                "event_type": "account.removed", "occurred_at": now,
+                "source_component": "ui", "account_alias": alias,
+                "reason_code": "account.removed",
+                "safe_detail": f"account {alias} removed from policy",
+            })
+        for alias in sorted(set(old_accounts) & set(new_accounts)):
+            before, after = old_accounts[alias], new_accounts[alias]
+            changes = [k for k in ("enabled", "priority", "status", "label", "profile")
+                       if before.get(k) != after.get(k)]
+            if changes:
+                audits.append({
+                    "event_type": "account.updated", "occurred_at": now,
+                    "source_component": "ui", "account_alias": alias,
+                    "reason_code": "account.updated",
+                    "safe_detail": f"account {alias} changed: {', '.join(changes)}",
+                })
+        return audits
+
+    def _catalog_gate(self, store: EventStore, doc: dict[str, Any],
+                      current: dict[str, Any]) -> tuple[bool, list[str]]:
+        """Catalog gate for newly introduced models.
+
+        Returns ``(fresh, unverified_models)``. A model absent from a *fresh*
+        catalog raises ``EventValidationError``; when the catalog is unknown,
+        new models are allowed but flagged ``catalog_unverified`` — unknown
+        catalog is never presented as 'unavailable'.
+        """
+        current_models = {r.get("model") for r in (current.get("routes") or [])}
+        fresh = False
+        known: set[str] = set()
+        try:
+            rows = store.catalog()
+            seen = [r.get("catalog_seen_at") or 0 for r in rows]
+            fresh = bool(rows) and max(seen + [0]) > 0
+            known = {str(r.get("model")) for r in rows}
+        except Exception:
+            pass
+        unverified = [str(r.get("model")) for r in (doc.get("routes") or [])
+                      if r.get("model") not in current_models
+                      and str(r.get("model")) not in known]
+        if fresh:
+            missing = [m for m in unverified if m]
+            if missing:
+                raise EventValidationError(
+                    f"fresh catalog omits new model(s) {missing}; not activated")
+        return fresh, unverified
+
+    def _save_policy(self, body: Any) -> None:
+        if not isinstance(body, dict) or not isinstance(body.get("doc"), dict):
+            raise EventValidationError("policy save requires a doc object")
+        note = str(body.get("note") or "")[:256]
+        expected = body.get("expected_digest")
+        try:
+            candidate = validate_policy(
+                json.loads(json.dumps(body["doc"])))
+        except PolicyError as exc:
+            raise EventValidationError(f"policy rejected: {exc}") from exc
+        with self.service.store() as store:
+            current, _, _ = store.active_policy_doc()
+            if body.get("dry_run"):
+                audits = self._policy_diff(current, candidate)
+                _, unverified = self._catalog_gate(store, candidate, current)
+                self._json(200, {"ok": True, "dry_run": True, "audits": audits,
+                                 "catalog_unverified": unverified})
+                return
+            _, unverified = self._catalog_gate(store, candidate, current)
+            try:
+                saved = store.save_policy_version(
+                    candidate, created_by="ui",
+                    note=note, expected_digest=expected)
+            except EventConflictError as exc:
+                self._json(409, {"ok": False, "error": str(exc)})
+                return
+            for audit in self._policy_diff(current, candidate):
+                try:
+                    store.ingest(audit)
+                except (EventValidationError, EventConflictError):
+                    pass
+            self._json(200, {"ok": True, "result": saved,
+                             "catalog_unverified": unverified,
+                             "state_revision": store.revision()})
+
+    def _rollback_policy(self, body: Any) -> None:
+        if not isinstance(body, dict) or body.get("version") is None:
+            raise EventValidationError("policy rollback requires a version")
+        try:
+            version = int(body["version"])
+        except (TypeError, ValueError) as exc:
+            raise EventValidationError("version must be an integer") from exc
+        with self.service.store() as store:
+            try:
+                saved = store.rollback_policy(version, created_by="ui")
+            except PolicyError as exc:
+                raise EventValidationError(str(exc)) from exc
+            self._json(200, {"ok": True, "result": saved,
+                             "state_revision": store.revision()})
+
+    @staticmethod
+    def _profile_check(alias: str, profile: str) -> dict[str, Any]:
+        """Credential-safe profile verification: existence checks only.
+
+        Never reads file contents — no tokens, auth blobs, or secrets are
+        opened. Returns status plus the raw checks as UI evidence.
+        """
+        root = os.environ.get("PI_PROFILE_ROOT", "").strip() or str(
+            Path.home() / ".pi" / "supervisor-accounts")
+        profile_dir = Path(root) / profile
+        agent_dir = profile_dir / "agent"
+        checks = {
+            "profile_dir": profile_dir.is_dir(),
+            "agent_dir": agent_dir.is_dir(),
+            "auth_present": (agent_dir / "auth.json").exists(),
+            "models_present": (agent_dir / "models.json").exists(),
+        }
+        if checks["auth_present"] and checks["agent_dir"]:
+            status = "verified"
+        elif checks["agent_dir"]:
+            status = "signin-needed"
+        elif checks["profile_dir"]:
+            status = "profile"
+        else:
+            status = "tracked"
+        return {"status": status, "checks": checks,
+                "profile_dir": str(profile_dir)}
+
+    def _mutate_account(self, body: Any) -> None:
+        if not isinstance(body, dict) or not body.get("op"):
+            raise EventValidationError("account mutation requires an op")
+        op = str(body["op"])
+        if op not in ("add", "update", "move", "remove", "verify"):
+            raise EventValidationError(f"unknown account op: {op}")
+        alias = str(body.get("id") or body.get("alias") or "")
+        if not alias or not ALIAS_RE.match(alias):
+            raise EventValidationError(
+                f"account id must match {ALIAS_RE.pattern}")
+        with self.service.store() as store:
+            current, _, _ = store.active_policy_doc()
+            doc = json.loads(json.dumps(current))
+            accounts = [a for a in (doc.get("accounts") or []) if isinstance(a, dict)]
+            by_id = {a.get("id"): a for a in accounts}
+            routes = doc.get("routes") or []
+            attached = [r.get("model") for r in routes
+                        if isinstance(r, dict) and alias in (r.get("accounts") or [])]
+            if op == "add":
+                if alias in by_id:
+                    self._json(409, {"ok": False,
+                                     "error": f"account {alias} already registered"})
+                    return
+                priorities = [a.get("priority", 0) for a in accounts
+                              if isinstance(a.get("priority"), int)]
+                entry: dict[str, Any] = {
+                    "id": alias, "label": str(body.get("label") or alias)[:64],
+                    "enabled": bool(body.get("enabled", True)),
+                    "priority": body.get("priority", max(priorities + [-1]) + 1),
+                    "profile": str(body.get("profile") or alias)[:64],
+                    "status": "tracked",
+                }
+                if not isinstance(entry["priority"], int) or entry["priority"] < 0:
+                    raise EventValidationError("priority must be a non-negative integer")
+                siblings = {a.get("profile", a.get("id")) for a in accounts}
+                if entry["profile"] in siblings:
+                    raise EventValidationError(
+                        f"profile {entry['profile']!r} is already mapped by another "
+                        "account; each alias maps to a distinct profile")
+                attach = body.get("attach_routes") or []
+                if body.get("attach_all_routes"):
+                    attach = [r.get("model") for r in routes if isinstance(r, dict)]
+                wanted = {str(m) for m in attach}
+                known_models = {str(r.get("model")) for r in routes
+                                if isinstance(r, dict)}
+                unknown = sorted(wanted - known_models)
+                if unknown:
+                    raise EventValidationError(f"unknown route model(s): {unknown}")
+                accounts.append(entry)
+                for route in routes:
+                    if isinstance(route, dict) and route.get("model") in wanted \
+                            and alias not in (route.get("accounts") or []):
+                        route["accounts"] = list(route.get("accounts") or []) + [alias]
+            elif op == "update":
+                if alias not in by_id:
+                    raise EventValidationError(f"unknown account: {alias}")
+                entry = by_id[alias]
+                if body.get("status") == "verified":
+                    raise EventValidationError(
+                        "status 'verified' is only granted by the verify op")
+                for key in ("label", "profile", "status"):
+                    if body.get(key) is not None:
+                        entry[key] = str(body[key])[:64]
+                if body.get("enabled") is not None:
+                    entry["enabled"] = bool(body["enabled"])
+                if body.get("priority") is not None:
+                    if not isinstance(body["priority"], int) or body["priority"] < 0:
+                        raise EventValidationError(
+                            "priority must be a non-negative integer")
+                    entry["priority"] = body["priority"]
+                siblings = {a.get("profile", a.get("id")) for a in accounts
+                            if a.get("id") != alias}
+                if entry.get("profile", alias) in siblings:
+                    raise EventValidationError(
+                        f"profile {entry.get('profile')!r} is already mapped by "
+                        "another account")
+            elif op == "move":
+                if alias not in by_id:
+                    raise EventValidationError(f"unknown account: {alias}")
+                if not isinstance(body.get("priority"), int) or body["priority"] < 0:
+                    raise EventValidationError(
+                        "move requires a non-negative integer priority")
+                by_id[alias]["priority"] = body["priority"]
+            elif op == "remove":
+                if alias not in by_id:
+                    raise EventValidationError(f"unknown account: {alias}")
+                detach = bool(body.get("detach"))
+                if attached and not detach and not body.get("preview"):
+                    self._json(409, {"ok": False,
+                                     "error": (f"account {alias} is attached to "
+                                               f"route(s) {attached}; preview the impact "
+                                               "then remove with detach:true"),
+                                     "attached_routes": attached})
+                    return
+                if detach:
+                    for route in routes:
+                        if isinstance(route, dict) and alias in (route.get("accounts") or []):
+                            route["accounts"] = [a for a in route["accounts"]
+                                                 if a != alias]
+                accounts = [a for a in accounts if a.get("id") != alias]
+            elif op == "verify":
+                if alias not in by_id:
+                    raise EventValidationError(f"unknown account: {alias}")
+                entry = by_id[alias]
+                profile = str(entry.get("profile") or alias)
+                siblings = {a.get("profile", a.get("id")) for a in accounts
+                            if a.get("id") != alias}
+                if profile in siblings:
+                    raise EventValidationError(
+                        f"profile {profile!r} is mapped by another account; "
+                        "verification refused")
+                check = self._profile_check(alias, profile)
+                entry["status"] = check["status"]
+                note = str(body.get("note") or "verified via dashboard")[:256]
+                if body.get("preview"):
+                    self._json(200, {"ok": True, "preview": True, "op": op,
+                                     "id": alias, "check": check})
+                    return
+                try:
+                    validate_policy(doc)
+                except PolicyError as exc:
+                    raise EventValidationError(f"policy rejected: {exc}") from exc
+                saved = store.save_policy_version(doc, created_by="ui", note=note)
+                store.ingest({
+                    "event_type": "account.verified",
+                    "occurred_at": int(time.time() * 1000),
+                    "source_component": "ui", "account_alias": alias,
+                    "reason_code": "account.verified",
+                    "safe_detail": (f"account {alias} profile check: "
+                                      f"{check['status']}")[:512],
+                })
+                self._json(200, {"ok": True, "result": saved,
+                                 "check": check,
+                                 "state_revision": store.revision()})
+                return
+            preview_doc = dict(doc)
+            preview_doc["accounts"] = accounts
+            if op == "remove" and body.get("preview") and attached and not detach:
+                # Preview visualizes the impact *including* the detach the
+                # operator must confirm; the real save still fails closed
+                # without explicit detach:true.
+                detached_routes = []
+                for route in routes:
+                    rest = dict(route) if isinstance(route, dict) else route
+                    if isinstance(rest, dict) and alias in (rest.get("accounts") or []):
+                        rest["accounts"] = [a for a in rest["accounts"] if a != alias]
+                    detached_routes.append(rest)
+                preview_doc["routes"] = detached_routes
+            try:
+                candidate = validate_policy(preview_doc)
+            except PolicyError as exc:
+                raise EventValidationError(f"policy rejected: {exc}") from exc
+            if body.get("preview"):
+                self._json(200, {"ok": True, "preview": True, "op": op,
+                                 "id": alias,
+                                 "audits": self._policy_diff(current, candidate),
+                                 "attached_routes": attached,
+                                 "requires_detach": bool(attached and op == "remove"
+                                                           and not detach),
+                                 "candidate": candidate})
+                return
+            saved = store.save_policy_version(
+                candidate, created_by="ui",
+                note=str(body.get("note") or f"account {op}: {alias}")[:256])
+            for audit in self._policy_diff(current, candidate):
+                try:
+                    store.ingest(audit)
+                except (EventValidationError, EventConflictError):
+                    pass
+            self._json(200, {"ok": True, "result": saved,
+                             "attached_routes": attached,
+                             "state_revision": store.revision()})
 
 
 def _installed_identity(state_root: Path) -> dict[str, Any]:

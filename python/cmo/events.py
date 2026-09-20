@@ -22,7 +22,9 @@ from .db import (bump_revision, connect, ensure_schema, read_revision,
                  run_transaction, set_meta)
 from .policy import (FAILURE_TAXONOMY, REASON_AUTH, REASON_CAPABILITY,
                      REASON_CONTEXT, REASON_QUOTA_CONFIRMED, REASON_QUOTA_UNKNOWN,
-                     REASON_TRANSIENT, TIER_FREE, TIER_SUBSCRIPTION, route_key)
+                     REASON_TRANSIENT, TIER_FREE, TIER_SUBSCRIPTION,
+                     PolicyError, load_canonical_policy, policy_digest, route_key,
+                     validate_policy)
 
 EVENT_SCHEMA = "cmo.event/v1"
 
@@ -41,6 +43,8 @@ EVENT_TYPES = {
     "catalog.refreshed", "catalog.failed",
     "route.recheck.requested", "route.recheck.started", "route.recheck.succeeded",
     "route.recheck.failed", "route.recheck.blocked",
+    "policy.saved", "policy.rolled_back",
+    "account.added", "account.updated", "account.removed", "account.verified",
     "override.created", "override.cleared", "override.expired",
     "service.heartbeat",
 }
@@ -438,6 +442,123 @@ class EventStore:
         return [dict(r) for r in self._conn.execute(
             "SELECT * FROM recheck_requests WHERE status=? ORDER BY requested_at DESC",
             (status,))]
+
+    def recheck_history(self, limit: int = 20) -> list[dict[str, Any]]:
+        """All recheck requests, newest first: pending/running plus settled
+        outcomes (finished/blocked/failed) with their ``last_error`` so the
+        dashboard can show the full queued → running → result lifecycle."""
+        return [dict(r) for r in self._conn.execute(
+            "SELECT * FROM recheck_requests ORDER BY requested_at DESC LIMIT ?",
+            (max(1, min(int(limit), 100)),))]
+
+    # -- versioned policy ---------------------------------------------
+
+    def active_policy_doc(self) -> tuple[dict[str, Any], int, bool]:
+        """Return ``(doc, version, is_saved)``: the saved active policy, or
+        the canonical document with version 0 when nothing was saved yet."""
+        row = self._conn.execute(
+            "SELECT version, doc FROM policy_versions WHERE active=1 "
+            "ORDER BY version DESC LIMIT 1").fetchone()
+        if row is None:
+            return load_canonical_policy(), 0, False
+        return json.loads(str(row["doc"])), int(row["version"]), True
+
+    def policy_versions(self, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self._conn.execute(
+            "SELECT version, digest, created_at, created_by, note, active "
+            "FROM policy_versions ORDER BY version DESC LIMIT ?",
+            (max(1, min(int(limit), 100)),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def save_policy_version(self, doc: dict[str, Any], created_by: str,
+                            note: str = "",
+                            expected_digest: str | None = None) -> dict[str, Any]:
+        """Atomically validate, version, and activate a policy document.
+
+        Fails closed: a ``PolicyError`` leaves the active policy untouched.
+        ``expected_digest`` implements compare-and-set against the currently
+        active digest so concurrent edits get an explicit conflict instead of
+        lost updates. Every save appends a NEW version row — even for a
+        document identical to an earlier version — so history (including
+        rollbacks) is append-only and every activation is reversible. The save
+        is recorded as a ``policy.saved`` audit event plus a receipt.
+        """
+        try:
+            validated = validate_policy(json.loads(json.dumps(doc)))
+        except PolicyError:
+            raise
+        except (ValueError, TypeError) as exc:
+            raise PolicyError(f"policy is not JSON-serializable: {exc}") from exc
+        digest = policy_digest(validated)
+        outcome: dict[str, Any] = {}
+
+        def work() -> None:
+            current = self._conn.execute(
+                "SELECT digest FROM policy_versions WHERE active=1 "
+                "ORDER BY version DESC LIMIT 1").fetchone()
+            current_digest = str(current["digest"]) if current else policy_digest(
+                load_canonical_policy())
+            if expected_digest is not None and expected_digest != current_digest:
+                raise EventConflictError(
+                    f"policy conflict: expected active digest {expected_digest[:12]} "
+                    f"but found {current_digest[:12]}; reload and re-apply")
+            existing = self._conn.execute(
+                "SELECT version FROM policy_versions WHERE digest=? "
+                "ORDER BY version DESC LIMIT 1",
+                (digest,)).fetchone()
+            self._conn.execute(
+                "UPDATE policy_versions SET active=0 WHERE active=1")
+            cursor = self._conn.execute(
+                "INSERT INTO policy_versions(digest, doc, created_at, "
+                "created_by, note, active) VALUES(?,?,?,?,?,1)",
+                (digest, json.dumps(validated, sort_keys=True),
+                 now_ms(), str(created_by or "ui")[:64],
+                 str(note or "")[:256]))
+            outcome.update({"version": int(cursor.lastrowid),
+                            "reactivated": False,
+                            "same_as_version": (int(existing["version"])
+                                                 if existing is not None else None)})
+            self._conn.execute(
+                "INSERT OR IGNORE INTO migration_receipts(source_fingerprint, "
+                "imported_at, event_count) VALUES(?,?,?)",
+                (f"policy-saved-v{outcome['version']}-{digest[:12]}",
+                 now_ms(), 1))
+            bump_revision(self._conn, 1)
+            outcome.update({"digest": digest})
+
+        run_transaction(self._conn, work)
+        self.ingest({
+            "event_type": "policy.saved", "occurred_at": now_ms(),
+            "source_component": created_by or "ui",
+            "reason_code": "policy.saved",
+            "safe_detail": (f"policy v{outcome['version']} activated "
+                              f"({digest[:12]}): {note or 'saved'}"[:MAX_DETAIL]),
+        })
+        outcome["schema"] = "cmo.policy/v1"
+        return outcome
+
+    def rollback_policy(self, version: int, created_by: str) -> dict[str, Any]:
+        """Roll back by saving the historical document as a NEW version.
+
+        History is append-only: rollback never mutates saved versions, so the
+        rollback itself is reversible. Emits ``policy.rolled_back``."""
+        row = self._conn.execute(
+            "SELECT digest, doc FROM policy_versions WHERE version=?",
+            (int(version),)).fetchone()
+        if row is None:
+            raise PolicyError(f"no saved policy version {int(version)}")
+        doc = json.loads(str(row["doc"]))
+        saved = self.save_policy_version(
+            doc, created_by, note=f"rollback to v{int(version)}")
+        self.ingest({
+            "event_type": "policy.rolled_back", "occurred_at": now_ms(),
+            "source_component": created_by or "ui",
+            "reason_code": "policy.rolled_back",
+            "safe_detail": (f"rolled back to v{int(version)} as "
+                              f"v{saved['version']}"[:MAX_DETAIL]),
+        })
+        saved["rolled_back_to"] = int(version)
+        return saved
 
     def revision(self) -> int:
         return read_revision(self._conn)

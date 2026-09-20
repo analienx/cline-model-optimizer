@@ -163,6 +163,18 @@ CREATE TABLE IF NOT EXISTS recheck_requests (
     attempt INTEGER NOT NULL DEFAULT 0,
     last_error TEXT
 );
+
+CREATE TABLE IF NOT EXISTS policy_versions (
+    version INTEGER PRIMARY KEY AUTOINCREMENT,
+    digest TEXT NOT NULL,
+    doc TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    created_by TEXT,
+    note TEXT,
+    active INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_policy_active ON policy_versions(active);
+CREATE INDEX IF NOT EXISTS idx_policy_digest ON policy_versions(digest);
 """
 
 _RECHECK_COLUMNS = ("started_at", "finished_at", "lease_owner", "attempt",
@@ -178,6 +190,40 @@ def _ensure_recheck_columns(conn: sqlite3.Connection) -> None:
                 else "INTEGER NOT NULL DEFAULT 0" if column == "attempt" \
                 else "TEXT"
             conn.execute(f"ALTER TABLE recheck_requests ADD COLUMN {column} {definition}")
+
+
+def _ensure_policy_digest_nonunique(conn: sqlite3.Connection) -> None:
+    """Drop the Stage-B-era UNIQUE constraint on policy_versions.digest.
+
+    Every save — including a rollback to a previously seen document — is a
+    new version row, so identical digests must be able to repeat. Rebuilds
+    the table once when the legacy unique index is detected."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='policy_versions'").fetchone()
+    if row is None or not row["sql"]:
+        return
+    definition = str(row["sql"]).upper()
+    if "DIGEST TEXT NOT NULL UNIQUE" not in definition.replace("  ", " "):
+        return
+    conn.execute("ALTER TABLE policy_versions RENAME TO policy_versions_legacy")
+    conn.executescript("""
+CREATE TABLE policy_versions (
+    version INTEGER PRIMARY KEY AUTOINCREMENT,
+    digest TEXT NOT NULL,
+    doc TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    created_by TEXT,
+    note TEXT,
+    active INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_policy_active ON policy_versions(active);
+CREATE INDEX IF NOT EXISTS idx_policy_digest ON policy_versions(digest);
+""")
+    conn.execute("INSERT INTO policy_versions(version, digest, doc, created_at, "
+                 "created_by, note, active) SELECT version, digest, doc, "
+                 "created_at, created_by, note, active FROM policy_versions_legacy")
+    conn.execute("DROP TABLE policy_versions_legacy")
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
@@ -197,6 +243,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
     _ensure_recheck_columns(conn)
+    _ensure_policy_digest_nonunique(conn)
     row = conn.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
     if row is None:
         conn.execute("INSERT INTO metadata(key, value) VALUES('schema_version', ?)",

@@ -7,16 +7,21 @@ configured probe executor, then ingests the settlement event
 also move route state, so a recheck can never stay ``pending`` forever: every
 pass either advances a request or records why it cannot run.
 
-Probe executor contract (``CMO_PROBE_COMMAND``, optional):
-``<command> <route_key> <account_alias> <provider> <model> <tier>`` with a
-bounded timeout. Exit 0 means the route served a real probe; exit 10 means
-provider-reported quota; exit 11 means auth failure; any other exit (or a
-timeout, or no command configured) settles the request as ``blocked``/``failed``
-with an explicit reason — never as a synthetic success.
+Probe executor protocol (real Pi probe, ``tools/pi/pi-model-probe.mjs``):
+``<probe> --provider <provider> --model <model> --agent-dir <dir>``
+``--thinking off --timeout-ms <ms>`` where ``<probe>`` is ``$PI_MODEL_PROBE``
+(or the legacy ``$CMO_PROBE_COMMAND`` raw split) and ``<dir>`` is
+``$PI_PROFILE_ROOT/<alias>/agent`` (default ``~/.pi/supervisor-accounts``).
+The probe prints a trailing JSON line
+``{provider, model, status, detail, resetAfterMs}`` with ``status`` in
+``healthy|quota|auth|model|error|timeout``. The mapping is total: every probe
+result settles to exactly one of ``succeeded``/``failed``/``blocked`` with a
+taxonomy reason code — never a synthetic success.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import threading
@@ -25,7 +30,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .events import EventStore, now_ms
-from .policy import TIER_FREE, route_key
+from .policy import (ALIAS_RE, REASON_AUTH_PROBE, REASON_CAPABILITY,
+                     REASON_QUOTA_PROBE, REASON_TRANSIENT, TIER_FREE, route_key)
 
 RECHECK_INTERVAL_S = 5
 RECHECK_TIMEOUT_S = 60
@@ -33,8 +39,6 @@ RECHECK_COOLDOWN_MS = 5 * 60 * 1000
 STALE_RUNNING_MS = 2 * 60 * 1000
 
 EXIT_OK = 0
-EXIT_QUOTA = 10
-EXIT_AUTH = 11
 
 
 def split_route_key(value: str) -> tuple[str, str, str, str]:
@@ -45,48 +49,114 @@ def split_route_key(value: str) -> tuple[str, str, str, str]:
     return parts[0], parts[1], parts[2], parts[3]
 
 
-def _probe_command() -> list[str] | None:
+PROBE_STATUSES = ("healthy", "quota", "auth", "model", "error", "timeout")
+
+
+def _probe_script() -> list[str] | None:
+    """Resolve the probe executable: ``$PI_MODEL_PROBE`` (preferred) or the
+    legacy ``$CMO_PROBE_COMMAND`` raw split. Returns None when unconfigured."""
+    explicit = os.environ.get("PI_MODEL_PROBE", "").strip()
+    if explicit:
+        return [explicit]
     raw = os.environ.get("CMO_PROBE_COMMAND", "").strip()
     return raw.split() if raw else None
 
 
-def run_probe(route_key_value: str, timeout_s: int = RECHECK_TIMEOUT_S) -> dict[str, Any]:
-    """Run one bounded probe for a route. Never fabricates success.
+def _agent_dir(account: str) -> Path | None:
+    """Profile agent dir for an account alias; None when the alias is unsafe."""
+    if not ALIAS_RE.match(account or ""):
+        return None
+    root = os.environ.get("PI_PROFILE_ROOT", "").strip() or str(
+        Path.home() / ".pi" / "supervisor-accounts")
+    return Path(root) / account / "agent"
 
-    Returns ``{"outcome": "succeeded"|"failed"|"blocked", "reason": str,
-    "detail": str}`` where ``reason`` is a taxonomy-safe code and ``detail``
-    carries the human explanation (stored in ``safe_detail``).
+
+def _parse_probe_output(text: str) -> dict[str, Any] | None:
+    """Parse the trailing JSON status line from probe stdout."""
+    for line in reversed((text or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get("status") in PROBE_STATUSES:
+            return data
+    return None
+
+
+def _from_probe_status(data: dict[str, Any]) -> dict[str, Any]:
+    """Map a probe JSON status to a settlement (total function)."""
+    status = str(data.get("status") or "error")
+    detail = str(data.get("detail") or status)[:300].replace("\n", " ")
+    if status == "healthy":
+        return {"outcome": "succeeded", "reason": "probe.ok",
+                "detail": detail or "probe served a real response"}
+    if status == "quota":
+        reset = data.get("resetAfterMs")
+        try:
+            reset_ms = int(reset) if reset is not None else 0
+        except (TypeError, ValueError):
+            reset_ms = 0
+        return {"outcome": "failed", "reason": REASON_QUOTA_PROBE,
+                "detail": detail or "provider reported quota exhaustion",
+                "reset_after_ms": max(0, reset_ms)}
+    if status == "auth":
+        return {"outcome": "failed", "reason": REASON_AUTH_PROBE,
+                "detail": detail or "probe reported auth failure"}
+    if status == "model":
+        return {"outcome": "failed", "reason": REASON_CAPABILITY,
+                "detail": detail or "probe reported unknown model"}
+    return {"outcome": "failed", "reason": REASON_TRANSIENT,
+            "detail": detail or f"probe reported {status}"}
+def run_probe(route_key_value: str, timeout_s: int = RECHECK_TIMEOUT_S) -> dict[str, Any]:
+    """Run one bounded Pi probe for a route. Never fabricates success.
+
+    Invokes ``<probe> --provider <provider> --model <model> --agent-dir <dir>``
+    ``--thinking off --timeout-ms <ms>`` and parses the trailing JSON status
+    line. Returns ``{"outcome": "succeeded"|"failed"|"blocked", "reason":
+    str, "detail": str}`` where ``reason`` is a taxonomy-safe code and
+    ``detail`` carries the human explanation (stored in ``safe_detail``).
     """
     try:
         account, provider, model, tier = split_route_key(route_key_value)
     except ValueError as exc:
         return {"outcome": "blocked", "reason": "recheck.malformed_route",
                 "detail": f"malformed route_key: {exc}"}
-    command = _probe_command()
-    if not command:
+    script = _probe_script()
+    if not script:
         return {"outcome": "blocked", "reason": "recheck.no_probe_executor",
-                "detail": ("CMO_PROBE_COMMAND is not configured; a real Pi route "
-                           "probe cannot run, so the request is parked as blocked "
-                           "instead of reported successful")}
+                "detail": ("PI_MODEL_PROBE/CMO_PROBE_COMMAND is not configured; "
+                           "a real Pi route probe cannot run, so the request is "
+                           "parked as blocked instead of reported successful")}
+    agent_dir = _agent_dir(account)
+    if agent_dir is None:
+        return {"outcome": "blocked", "reason": "recheck.malformed_route",
+                "detail": f"account alias {account!r} is not a safe profile name"}
+    command = (script + ["--provider", provider, "--model", model,
+                         "--agent-dir", str(agent_dir), "--thinking", "off",
+                         "--timeout-ms", str(int(timeout_s * 1000))])
     try:
-        proc = subprocess.run(command + [route_key_value, account, provider, model, tier],
-                              capture_output=True, text=True, timeout=timeout_s)
+        proc = subprocess.run(command, capture_output=True, text=True,
+                              timeout=timeout_s)
     except subprocess.TimeoutExpired:
-        return {"outcome": "failed", "reason": "recheck.timeout",
-                "detail": "probe exceeded its bounded timeout"}
+        return {"outcome": "blocked", "reason": "recheck.timeout",
+                "detail": "probe exceeded its bounded timeout; route stays parked"}
     except OSError as exc:
         return {"outcome": "blocked", "reason": "probe.executor_unavailable",
                 "detail": f"probe executor could not start: {exc}"}
-    tail = (proc.stderr or proc.stdout or "")[-300:].strip().replace("\n", " ")
-    if proc.returncode == EXIT_OK:
-        return {"outcome": "succeeded", "reason": "recheck.probe_succeeded"}
-    if proc.returncode == EXIT_QUOTA:
-        return {"outcome": "failed", "reason": "quota.probe_confirmed"}
-    if proc.returncode == EXIT_AUTH:
-        return {"outcome": "failed", "reason": "auth.probe_failed",
-                "detail": tail or "probe reported auth failure"}
-    code = f"probe.exit_{proc.returncode}"
-    return {"outcome": "failed", "reason": code, "detail": tail or code}
+    if proc.returncode not in (EXIT_OK,):
+        tail = (proc.stderr or proc.stdout or "")[-300:].strip().replace("\n", " ")
+        return {"outcome": "blocked",
+                "reason": f"probe.exit_{proc.returncode}",
+                "detail": tail or f"probe exited {proc.returncode}"}
+    parsed = _parse_probe_output(proc.stdout or "")
+    if parsed is None:
+        return {"outcome": "blocked", "reason": "probe.unparseable_output",
+                "detail": ("probe exited 0 but emitted no trailing JSON status "
+                           "line; refusing to treat silence as success")}
+    return _from_probe_status(parsed)
 
 
 def _route_identity(route_key_value: str) -> dict[str, str]:
@@ -96,15 +166,19 @@ def _route_identity(route_key_value: str) -> dict[str, str]:
 
 
 def _settle(store: EventStore, route_key_value: str, outcome: str, reason: str,
-            source: str = "cmo-worker", detail: str | None = None) -> None:
+            source: str = "cmo-worker", detail: str | None = None,
+            reset_after_ms: int = 0) -> None:
     identity = _route_identity(route_key_value)
     event_type = {"succeeded": "route.recheck.succeeded",
                   "failed": "route.recheck.failed"}.get(outcome, "route.recheck.blocked")
-    store.ingest({
+    payload: dict[str, Any] = {
         "event_type": event_type, "occurred_at": now_ms(),
         "source_component": source, "reason_code": reason,
         "safe_detail": (detail or reason), **identity,
-    })
+    }
+    if outcome == "failed" and reason == REASON_QUOTA_PROBE and reset_after_ms > 0:
+        payload["reset_after_ms"] = int(reset_after_ms)
+    store.ingest(payload)
 
 
 def _cooldown_active(store: EventStore, route_key_value: str, now: int) -> bool:
@@ -179,9 +253,14 @@ def step(store: EventStore,
     outcome = result.get("outcome") or "blocked"
     reason = str(result.get("reason") or f"recheck.{outcome}")
     detail = str(result.get("detail") or reason)
+    try:
+        reset_ms = int(result.get("reset_after_ms") or 0)
+    except (TypeError, ValueError):
+        reset_ms = 0
     # A recheck never authorizes spend: subscription legs keep their tier label
     # but the probe itself must be a free, bounded status check.
-    _settle(store, route_key_value, outcome, reason, detail=detail)
+    _settle(store, route_key_value, outcome, reason, detail=detail,
+            reset_after_ms=max(0, reset_ms))
     report["settled"] += 1
     report["outcome"] = outcome
     report["reason"] = reason

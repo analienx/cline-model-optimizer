@@ -11,7 +11,7 @@ from typing import Any
 
 from .policy import (REASON_AUTH, REASON_CAPABILITY, REASON_OVERRIDE,
                      REASON_QUOTA_CONFIRMED, REASON_QUOTA_UNKNOWN, REASON_TRANSIENT,
-                     TIER_FREE, TIER_SUBSCRIPTION, load_canonical_policy,
+                     TIER_FREE, TIER_SUBSCRIPTION, account_order, load_canonical_policy,
                      routes_for_strategy, STRATEGY_FREE_FIRST, STRATEGY_STANDARD)
 
 ROUTE_STATES = (
@@ -81,10 +81,33 @@ class DecisionEngine:
         routes = routes_for_strategy(effective_strategy, self.policy)
         if free_only:
             routes = [r for r in routes if r["tier"] == TIER_FREE]
-
+        cap = self.policy.get("defaults", {}).get("max_enabled_free_models")
         skipped: list[dict[str, Any]] = []
+        if isinstance(cap, int) and cap > 0:
+            kept: list[dict[str, Any]] = []
+            free_used = 0
+            for route in routes:
+                if route["tier"] == TIER_FREE:
+                    if free_used >= cap:
+                        skipped_cap = self._skip(
+                            f"cap:{route['model']}", route,
+                            (route["accounts"] or ["-"])[0], "DISABLED",
+                            "policy.cap",
+                            f"beyond max_enabled_free_models={cap}")
+                        skipped.append(skipped_cap)
+                        continue
+                    free_used += 1
+                kept.append(route)
+            routes = kept
+        # Saved account priority drives expansion (model-major): each model is
+        # tried across enabled accounts in priority order before the next model.
+        order = account_order(self.policy)
+        rank = {alias: i for i, alias in enumerate(order)}
+
         for route in routes:
-            for account in route["accounts"]:
+            ordered_accounts = sorted(route["accounts"],
+                                      key=lambda a: rank.get(a, 1 << 30))
+            for account in ordered_accounts:
                 rk = self._route_key(account, route)
                 row = state_by_key.get(rk)
                 if rk in active_skips:

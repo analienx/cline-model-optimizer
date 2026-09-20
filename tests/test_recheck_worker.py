@@ -49,6 +49,7 @@ def test_step_settles_with_injected_probe(db: Path):
 
 def test_step_without_executor_blocks_honestly(db: Path, monkeypatch):
     monkeypatch.delenv("CMO_PROBE_COMMAND", raising=False)
+    monkeypatch.delenv("PI_MODEL_PROBE", raising=False)
     store = EventStore(db)
     try:
         _request(store)

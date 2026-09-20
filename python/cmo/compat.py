@@ -53,10 +53,28 @@ def _stamp(payload: dict[str, Any], revision: int, now: int, digest: str) -> dic
     return payload
 
 
-def _foundry_route_policy(snapshot: dict[str, Any], now: int) -> dict[str, Any]:
-    policy = load_canonical_policy()
+def _snapshot_policy(snapshot: dict[str, Any],
+                     full: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Active policy for exports; the full saved doc when available.
+
+    The snapshot carries a display subset (extra ``version``/``saved`` keys
+    and no canonical-only keys), which would perturb ``policy_digest``. The
+    full document keeps every consumer digest stable across save/rollback."""
+    if isinstance(full, dict) and full.get("routes"):
+        return full
+    policy = (snapshot.get("policy") or {})
+    if isinstance(policy, dict) and policy.get("routes"):
+        return policy
+    return load_canonical_policy()
+
+
+def _foundry_route_policy(snapshot: dict[str, Any], now: int,
+                          full_policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    policy = _snapshot_policy(snapshot, full_policy)
     free_models: list[str] = []
     for route in policy["routes"]:
+        if route.get("enabled", True) is False:
+            continue
         if route["tier"] == "free" and route["model"] not in free_models:
             free_models.append(route["model"])
     free_route = []
@@ -161,8 +179,9 @@ def _aliases(model: str) -> list[str]:
 
 
 def _model_routing(snapshot: dict[str, Any], revision: int, now: int,
-                   digest: str) -> dict[str, Any]:
-    policy = load_canonical_policy()
+                   digest: str,
+                   full_policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    policy = _snapshot_policy(snapshot, full_policy)
     strategies: dict[str, Any] = {}
     for name, spec in policy["strategies"].items():
         plan = [{"provider": route["provider"], "model": route["model"],
@@ -378,9 +397,13 @@ def write_compatibility_exports(store: EventStore, out_dir: Path, *,
     now = now_ms() if now is None else int(now)
     snapshot = build_snapshot(store)
     revision = snapshot["state_revision"]
+    try:
+        full_policy, _, _ = store.active_policy_doc()
+    except Exception:
+        full_policy = None
     payloads = {
-        "foundry-route-policy.json": _foundry_route_policy(snapshot, now),
-        "model-routing.json": _model_routing(snapshot, revision, now, ""),
+        "foundry-route-policy.json": _foundry_route_policy(snapshot, now, full_policy),
+        "model-routing.json": _model_routing(snapshot, revision, now, "", full_policy),
         "guardian-status.json": _guardian_status(snapshot, revision, now, ""),
         "guardian-state.json": {"LastCheck": ms_to_iso(now),
                                 "LastStatus": _guardian_status(snapshot, revision, now, "")["Status"],
@@ -408,7 +431,8 @@ def write_compatibility_exports(store: EventStore, out_dir: Path, *,
         "files": file_digests,
         "setDigest": digest,
         "stateRevision": revision,
-        "policyDigest": policy_digest(load_canonical_policy()),
+        "policyDigest": policy_digest(full_policy) if full_policy else snapshot["policy"].get(
+            "digest") or policy_digest(_snapshot_policy(snapshot)),
         "writer": GENERATED_BY,
         "note": ("Legacy guardian writers must be disabled before v2 writes these files. The "
                  "installer records the previous writer and rollback restores it."),

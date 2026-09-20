@@ -39,7 +39,7 @@ def build_snapshot(store: Any, *, now: int | None = None,
                    started_at: int | None = None,
                    pid: int | None = None) -> dict[str, Any]:
     now = now_ms() if now is None else int(now)
-    policy = load_canonical_policy()
+    policy, policy_version, policy_saved = store.active_policy_doc()
     defaults = policy["defaults"]
     ttl = int(defaults["evidence_ttl_ms"])
 
@@ -73,9 +73,11 @@ def build_snapshot(store: Any, *, now: int | None = None,
 
     active_overrides = {(o.get("route_key")): o for o in overrides}
     try:
+        history = store.recheck_history(limit=10)
         recheck_rows = store.recheck_requests(status="running") + \
             store.recheck_requests(status="pending")
     except Exception:
+        history = []
         recheck_rows = []
     recheck_by_route = {}
     for req in recheck_rows:
@@ -126,6 +128,9 @@ def build_snapshot(store: Any, *, now: int | None = None,
             "owner": policy["owner"],
             "neverPayg": policy["neverPayg"],
             "digest": policy_digest(policy),
+            "version": policy_version,
+            "saved": policy_saved,
+            "accounts": policy.get("accounts", []),
             "routes": policy["routes"],
             "strategies": policy["strategies"],
             "defaults": defaults,
@@ -152,7 +157,10 @@ def build_snapshot(store: Any, *, now: int | None = None,
         "cells": cells,
         "catalog": catalog_rows,
         "overrides": overrides,
-        "recheck_requests": store.recheck_requests(),
+        "recheck_requests": (recheck_rows if isinstance(recheck_rows, list) else []) + [
+            r for r in history
+            if str(r.get("status", "")) not in ("pending", "running")
+        ][:10],
         "decision": decision,
         "recent_events": store.events(limit=50),
     }
