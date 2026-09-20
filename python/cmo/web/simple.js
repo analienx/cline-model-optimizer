@@ -108,23 +108,14 @@ function accountSetupCommand(id,stage){
  return 'powershell -NoProfile -File "' + String.raw`C:\Workspace\repos\config\tools\pi` + '\\' + helper + '" -Account ' + id;
 }
 async function copySetupCommand(id,stage,button,guide,feedback){
- const command=accountSetupCommand(id,stage);
  guide.open=true;
  const field=guide.querySelector('.account-command');
- let outcome='manual';let attempted=false;
+ let outcome='manual';
  try{
-  if(navigator.clipboard?.writeText){
-   attempted=true;
-   await navigator.clipboard.writeText(command);
-   if(navigator.clipboard.readText){
-    try{outcome=(await navigator.clipboard.readText())===command?'verified':'manual';}
-    catch{outcome='unconfirmed';}
-   }else outcome='unconfirmed';
-  }
- }catch{}
- if(outcome==='manual'&&attempted===false){
-  field.focus();field.select();
-  try{if(document.execCommand('copy')===true)outcome='unconfirmed';}catch{}
+  const response=await send('/api/simple/accounts/copy-command',{id,stage});
+  if(response.ok&&response.confirmed)outcome='verified';
+ }catch(error){
+  feedback.title='The Windows clipboard could not be verified: '+error.message;
  }
  state.setupHelp={id,stage,outcome};
  showSetupFeedback(stage,button,feedback,outcome);
@@ -134,10 +125,9 @@ async function copySetupCommand(id,stage,button,guide,feedback){
  }
 }
 function showSetupFeedback(stage,button,feedback,outcome){
- button.textContent=outcome==='verified'?'Copied & checked':outcome==='unconfirmed'?'Copy requested':'Select command';
- feedback.textContent=outcome==='verified'?'Clipboard text checked. Paste in PowerShell on this Windows computer, then complete sign-in and refresh setup.':
-  outcome==='unconfirmed'?'Browser could not confirm the clipboard. Try pasting in PowerShell; if it is missing, select the command below and press Ctrl+C.':
-  'Automatic copy was not confirmed. The command below is selected: press Ctrl+C on Windows, or use Copy from the text selection menu on mobile.';
+ button.textContent=outcome==='verified'?'Copied to Windows':'Select command';
+ feedback.textContent=outcome==='verified'?'Windows text clipboard checked. Open PowerShell, paste the command and complete sign-in. Then refresh setup.':
+  'Windows clipboard copy failed. The full command is selected below. Press Ctrl+C or use Copy from the selection menu, then paste into PowerShell.';
  feedback.hidden=false;
 }
 function renderAccounts(snap){const box=clear($('accounts'));
@@ -164,7 +154,7 @@ function renderAccounts(snap){const box=clear($('accounts'));
   const command=el('textarea','account-command');command.value=accountSetupCommand(account.id,stage);command.readOnly=true;command.rows=3;command.spellcheck=false;command.setAttribute('aria-label','Setup command for '+account.id);
   body.append(el('p','',stage==='signin'?'On your Windows computer, copy this command and run it in PowerShell and complete the browser sign-in using this account.':'On your Windows computer, copy this command and run it in PowerShell. This creates only the isolated profile for this account.'),command);
   body.append(makeButton('Refresh setup',()=>load(true)));
-  body.append(el('p','account-device-note','Clipboard actions affect this browser device only. If you are viewing the dashboard on a phone, open it on Windows to paste into Windows PowerShell.'));
+  body.append(el('p','account-device-note','Copy command writes to the Windows computer running this local dashboard, not to your phone clipboard.'));
   body.append(el('p','account-setup-hint',stage==='signin'?'A saved sign-in does not prove the email identity or free-model quota. Check availability separately.':'Once the profile is created, Refresh setup will show the separate sign-in step.'));
   guide.append(sum,body);
   const button=makeButton(stage==='signin'?'Copy sign-in command':'Copy setup command',()=>copySetupCommand(account.id,stage,button,guide,feedback));

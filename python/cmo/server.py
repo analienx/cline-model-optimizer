@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import SCHEMA_NAME, SCHEMA_VERSION, __version__
 from .catalog import DEFAULT_CATALOG_URL, refresh_catalog, fetch_catalog
+from .account_clipboard import command_for, copy_native_text
 from .db import connect, get_meta
 from .events import EventStore, EventValidationError, EventConflictError, ms_to_iso
 from .recheck import RecheckWorker
@@ -217,6 +218,8 @@ class CmoHandler(BaseHTTPRequestHandler):
                 self._create_override(body)
             elif path == "/api/simple/resume":
                 self._resume_goal(body)
+            elif path == "/api/simple/accounts/copy-command":
+                self._copy_account_command(body)
             elif path == "/api/simple/models":
                 self._save_simple_models(body)
             elif path == "/api/policy":
@@ -524,6 +527,41 @@ class CmoHandler(BaseHTTPRequestHandler):
             self._json(409, {'ok': False, 'error': str(exc)})
             return
         self._json(202, result)
+
+    def _copy_account_command(self, body: Any) -> None:
+        """Bounded same-origin action; puts only a registered account helper on Windows clipboard."""
+        origin = self.headers.get("Origin", "")
+        host = self.headers.get("Host", "")
+        if (not origin or origin.lower() != ("http://" + host).lower()
+                or self.headers.get("Content-Type", "").split(";")[0].lower() != "application/json"
+                or self.headers.get("Sec-Fetch-Site", "same-origin") != "same-origin"):
+            self._json(403, {"error": "same-origin JSON request required"})
+            return
+        if not isinstance(body, dict):
+            raise EventValidationError("invalid account copy request")
+        account, stage = body.get("id"), body.get("stage")
+        with self.service.store() as store:
+            policy, _, _ = store.active_policy_doc()
+        registered = [a for a in policy.get("accounts", []) if a.get("id") == account]
+        if (len(registered) != 1 or registered[0].get("profile", account) != account):
+            raise EventValidationError("unknown account")
+        from .account_clipboard import ACCOUNT
+        if not isinstance(account, str) or not ACCOUNT.fullmatch(account):
+            raise EventValidationError("invalid account")
+        root = Path(os.environ.get("PI_PROFILE_ROOT", "").strip() or
+                    str(Path.home() / ".pi" / "supervisor-accounts"))
+        expected_stage = "signin" if (root / account / "agent").is_dir() else "provision"
+        if stage != expected_stage:
+            self._json(409, {"error": "account setup changed; refresh first"})
+            return
+        try:
+            text = command_for(account, stage)
+        except (ValueError, FileNotFoundError) as exc:
+            raise EventValidationError(str(exc)) from exc
+        copied = copy_native_text(text)
+        self._json(200 if copied else 503,
+                   {"ok": copied, "confirmed": copied,
+                    "message": "Windows clipboard verified" if copied else "Windows clipboard unavailable"})
 
     def _simple_account_readiness(self) -> None:
         """Local Pi profile hints only: credential presence is not live login or entitlement."""

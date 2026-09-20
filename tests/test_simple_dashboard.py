@@ -86,18 +86,13 @@ class SimpleDashboardTests(PolicyServerCase):
             assert status==200
 
 
-def test_account_onboarding_has_visible_clipboard_action_and_readable_fallback():
+def test_account_onboarding_uses_native_windows_copy_and_manual_fallback():
     source=(Path(__file__).resolve().parents[1]/'python/cmo/web/simple.js').read_text(encoding='utf-8')
-    css=(Path(__file__).resolve().parents[1]/'python/cmo/web/simple.css').read_text(encoding='utf-8')
     assert 'Copy sign-in command' in source and 'Copy setup command' in source
-    assert 'navigator.clipboard.writeText(command)' in source
-    assert "document.execCommand('copy')" in source
-    assert "outcome='unconfirmed'" in source
-    assert 'navigator.clipboard.readText()' in source
+    assert "/api/simple/accounts/copy-command" in source
+    assert "document.execCommand('copy')" not in source
+    assert 'navigator.clipboard.writeText' not in source
+    assert 'Copied to Windows' in source
     assert 'field.focus();field.select()' in source
     assert "el('textarea','account-command')" in source
-    assert 'Automatic copy was not confirmed' in source
-    assert 'accountSetupCommand(account.id,stage)' in source
-    assert 'account-connect-button' in css
-    assert 'Command & manual copy' in source and 'Show command & instructions' in source and 'Refresh setup' in source
-    assert 'Run the Pi sign-in helper in PowerShell' not in source
+    assert 'Windows clipboard copy failed' in source
