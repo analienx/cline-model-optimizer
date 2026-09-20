@@ -270,6 +270,19 @@ def normalize_event(raw: dict[str, Any]) -> dict[str, Any]:
 
     event["reset_known"] = _optional_bool(event.get("reset_known"))
     event["free_only"] = _optional_bool(event.get("free_only"))
+    # Catalog data is typed evidence, not free text; reject malformed legacy
+    # payloads before the generic 512-character diagnostic scrubber can cut it.
+    if event_type == "catalog.refreshed" and not event.get("model"):
+        detail = raw.get("safe_detail")
+        if not isinstance(detail, str) or len(detail) > MAX_DETAIL:
+            raise EventValidationError("catalog summary must be bounded valid JSON")
+        try:
+            parsed = json.loads(detail)
+        except (ValueError, TypeError) as exc:
+            raise EventValidationError("catalog summary must be valid JSON") from exc
+        if not (isinstance(parsed, list) or
+                isinstance(parsed, dict) and isinstance(parsed.get("models"), list)):
+            raise EventValidationError("catalog summary requires a models list")
     event["safe_detail"] = scrub_detail(event.get("safe_detail"))
 
     if event_type in _ROUTE_EVENTS:
@@ -384,7 +397,45 @@ class EventStore:
         return outcome
 
     def ingest_many(self, raws: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        return [self.ingest(raw) for raw in raws]
+        """Atomically ingest a provider snapshot: all evidence or none."""
+        events = [normalize_event(raw) for raw in raws]
+        for event in events:
+            _reject_fixture_evidence(event, self.db_path)
+        received = now_ms()
+        results: list[dict[str, Any]] = []
+
+        def work() -> None:
+            for event in events:
+                digest = payload_hash(event)
+                existing = self._conn.execute(
+                    "SELECT payload_hash FROM events WHERE event_id=?",
+                    (event["event_id"],)).fetchone()
+                if existing is not None:
+                    if existing["payload_hash"] != digest:
+                        raise EventConflictError("batch contains a conflicting event ID")
+                    projection, inserted = "duplicate", False
+                else:
+                    columns = ["event_id", "event_type", "occurred_at", "received_at"] + [
+                        field for field in EVENT_FIELDS
+                        if field not in ("event_id", "event_type", "occurred_at")]
+                    values = [event["event_id"], event["event_type"],
+                              event["occurred_at"], received]
+                    values += [event.get(field) for field in columns[4:]]
+                    self._conn.execute(
+                        "INSERT INTO events (" + ",".join(columns) + ",payload_hash) "
+                        "VALUES (" + ",".join("?" for _ in columns) + ",?)",
+                        tuple(values) + (digest,))
+                    projection = apply_event(self._conn, event, received)
+                    bump_revision(self._conn, 1)
+                    inserted = True
+                results.append({"inserted": inserted, "duplicate": not inserted,
+                                "projection": projection, "schema": EVENT_SCHEMA,
+                                "event_id": event["event_id"],
+                                "revision": read_revision(self._conn),
+                                "received_at": received})
+
+        run_transaction(self._conn, work)
+        return results
 
     # -- reads ----------------------------------------------------------
 
@@ -898,30 +949,41 @@ def _apply_context_escalation(conn: sqlite3.Connection, event: dict[str, Any],
 
 def _apply_catalog_refreshed(conn: sqlite3.Connection, event: dict[str, Any],
                              received: int) -> str:
-    payload = event.get("safe_detail")
-    models: list[dict[str, Any]] = []
-    if payload:
-        try:
-            parsed = json.loads(payload)
-            if isinstance(parsed, dict) and isinstance(parsed.get("models"), list):
-                models = parsed["models"]
-            elif isinstance(parsed, list):
-                models = parsed
-        except (ValueError, TypeError):
-            models = []
     seen = int(event["occurred_at"])
-    for item in models:
-        if not isinstance(item, dict):
-            continue
-        model = item.get("model")
-        if not model:
-            continue
-        capability = item.get("capability") or "available"
+    model = event.get("model")
+    if model:
+        # One typed event per model avoids truncating a provider-sized catalog.
         conn.execute(
-            "INSERT INTO catalog_models(model, capability, catalog_seen_at, source) "
-            "VALUES(?,?,?,?) ON CONFLICT(model) DO UPDATE SET capability=excluded.capability, "
-            "catalog_seen_at=excluded.catalog_seen_at, source=excluded.source",
-            (str(model), str(capability), seen, event.get("source_component")))
+            "INSERT INTO catalog_models(model,capability,catalog_seen_at,source) "
+            "VALUES(?,?,?,?) ON CONFLICT(model) DO UPDATE SET "
+            "capability=excluded.capability,catalog_seen_at=excluded.catalog_seen_at, "
+            "source=excluded.source WHERE excluded.catalog_seen_at >= catalog_models.catalog_seen_at",
+            (model, event.get("capability") or "available", seen,
+             event.get("source_component")))
+        return "applied"
+    try:
+        parsed = json.loads(event.get("safe_detail") or "")
+        models = parsed.get("models") if isinstance(parsed, dict) else parsed
+        if not isinstance(models, list):
+            return "invalid_catalog_payload"
+    except (ValueError, TypeError):
+        # Historical truncated events must not claim a successful catalog.
+        return "invalid_catalog_payload"
+    previous = conn.execute(
+        "SELECT value FROM metadata WHERE key='catalog_last_success_at'").fetchone()
+    if previous and previous[0] and int(previous[0]) > seen:
+        return "late_catalog_ignored"
+    for item in models:
+        if not isinstance(item, dict) or not item.get("model"):
+            continue
+        conn.execute(
+            "INSERT INTO catalog_models(model,capability,catalog_seen_at,source) "
+            "VALUES(?,?,?,?) ON CONFLICT(model) DO UPDATE SET "
+            "capability=excluded.capability,catalog_seen_at=excluded.catalog_seen_at, "
+            "source=excluded.source WHERE excluded.catalog_seen_at >= catalog_models.catalog_seen_at",
+            (item["model"], item.get("capability") or "available", seen,
+             event.get("source_component")))
+    conn.execute("DELETE FROM catalog_models WHERE catalog_seen_at < ?", (seen,))
     set_meta(conn, "catalog_last_success_at", str(seen))
     set_meta(conn, "catalog_last_error_at", "")
     set_meta(conn, "catalog_last_error_reason", "")

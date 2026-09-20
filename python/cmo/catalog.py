@@ -1,9 +1,7 @@
-"""Bounded provider catalog refresh (read-only, no credentials)."""
-
+"""Bounded provider catalog refresh; catalog records are typed, never free text."""
 from __future__ import annotations
 
 import json
-import urllib.error
 import urllib.request
 from typing import Any
 
@@ -13,53 +11,64 @@ CATALOG_TIMEOUT_S = 10
 
 def fetch_catalog(url: str = DEFAULT_CATALOG_URL,
                   timeout: int = CATALOG_TIMEOUT_S) -> dict[str, Any]:
-    """Fetch and normalize the provider catalog into {model: capability}."""
     request = urllib.request.Request(url, headers={"Accept": "application/json",
                                                    "User-Agent": "cmo/2.0"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        raw = response.read().decode("utf-8", errors="replace")
-    payload = json.loads(raw)
+        payload = json.loads(response.read().decode("utf-8", errors="replace"))
+    if not isinstance(payload, dict):
+        raise ValueError("catalog response must be an object")
     models: dict[str, str] = {}
     buckets: dict[str, list[str]] = {}
-    if isinstance(payload, dict):
-        for key, value in payload.items():
-            if not isinstance(value, list):
-                continue
-            ids: list[str] = []
-            for item in value:
-                if isinstance(item, str):
-                    ids.append(item)
-                elif isinstance(item, dict):
-                    candidate = item.get("id") or item.get("model") or item.get("name")
-                    if isinstance(candidate, str):
-                        ids.append(candidate)
-            buckets[key] = ids
-            for model in ids:
-                models[model] = "available"
+    known = ("recommended", "free", "clinePass", "clineCloud")
+    if not any(isinstance(payload.get(key), list) for key in known):
+        raise ValueError("catalog response has no recognized model categories")
+    for key in known:
+        value = payload.get(key)
+        if not isinstance(value, list):
+            continue
+        ids: list[str] = []
+        for item in value:
+            candidate = (item if isinstance(item, str) else
+                         (item.get("id") or item.get("model") or item.get("name"))
+                         if isinstance(item, dict) else None)
+            if isinstance(candidate, str) and candidate.strip():
+                ids.append(candidate)
+                models[candidate] = "available"
+        buckets[key] = ids
+    if not models:
+        raise ValueError("catalog response contained no usable model identifiers")
     return {"models": models, "buckets": buckets, "source_url": url}
 
 
 def refresh_catalog(store: Any, catalog_url: str = DEFAULT_CATALOG_URL) -> dict[str, Any]:
-    """Fetch the provider catalog and record the outcome as evidence.
+    """Commit individual typed model evidence and one final refresh marker.
 
-    Success ingests ``catalog.refreshed``; any failure ingests ``catalog.failed``
-    and the last-good catalog rows are retained (never cleared on error).
-    Returns ``{"ok": bool, ...}``; never raises.
+    No full provider response is put in safe_detail (which is intentionally
+    capped and redacted for user-visible diagnostics). An interrupted refresh
+    is reported as failure and leaves last-good rows in place.
     """
     import time
     timestamp = int(time.time() * 1000)
     try:
         catalog = fetch_catalog(catalog_url)
-        models = [{"model": model, "capability": capability}
-                  for model, capability in sorted(catalog["models"].items())]
-        result = store.ingest({
-            "event_type": "catalog.refreshed", "occurred_at": timestamp,
-            "source_component": "cmo", "reason_code": "catalog.refreshed",
-            "safe_detail": json.dumps({"models": models}),
-        })
+        models = sorted(catalog["models"].items())
+        from .events import normalize_event
+        records = []
+        for model, capability in models:
+            record = {"event_type": "catalog.refreshed", "occurred_at": timestamp,
+                      "source_component": "cmo", "model": model,
+                      "capability": capability, "reason_code": "catalog.model"}
+            normalize_event(record)  # Validate ALL entries before writing any.
+            records.append(record)
+        # A complete marker must be last. It makes freshness truthful and
+        # retires models absent from this successful provider response.
+        records.append({"event_type": "catalog.refreshed", "occurred_at": timestamp,
+                        "source_component": "cmo", "reason_code": "catalog.refreshed",
+                        "safe_detail": '{"models": []}'})
+        results = store.ingest_many(records)
         return {"ok": True, "models": len(models),
-                "source_url": catalog["source_url"], "result": result}
-    except Exception as exc:  # network/provider failure: keep last-good catalog
+                "source_url": catalog["source_url"], "result": results[-1]}
+    except Exception as exc:
         try:
             result = store.ingest({
                 "event_type": "catalog.failed", "occurred_at": timestamp,
