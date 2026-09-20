@@ -32,3 +32,5 @@ button:hover:not(:disabled),details summary:hover{filter:brightness(.92)}button:
 .account-connect .account-command{user-select:text;-webkit-user-select:text;overflow-wrap:anywhere}
 .account-connect .account-setup-hint{color:#617169}
 @media(max-width:760px){.account-connect{padding:10px}.account-connect-button{width:100%}.account-connect .connect-label{flex-basis:100%}}
+
+.account-connect textarea.account-command{display:block;width:100%;min-height:77px;height:auto;resize:vertical;border:1px solid #c7dacb;border-radius:8px;background:#fff;padding:10px;font:12px/1.55 Consolas,monospace;color:#183c2e;user-select:text;-webkit-user-select:text;overflow-wrap:anywhere;white-space:pre-wrap}.account-connect textarea.account-command:focus{outline:3px solid #96bfa0;outline-offset:2px}.account-device-note{font-weight:650;color:#5a685d}

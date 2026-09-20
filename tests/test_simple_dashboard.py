@@ -92,8 +92,12 @@ def test_account_onboarding_has_visible_clipboard_action_and_readable_fallback()
     assert 'Copy sign-in command' in source and 'Copy setup command' in source
     assert 'navigator.clipboard.writeText(command)' in source
     assert "document.execCommand('copy')" in source
-    assert 'Clipboard access was blocked' in source
+    assert "outcome='unconfirmed'" in source
+    assert 'navigator.clipboard.readText()' in source
+    assert 'field.focus();field.select()' in source
+    assert "el('textarea','account-command')" in source
+    assert 'Automatic copy was not confirmed' in source
     assert 'accountSetupCommand(account.id,stage)' in source
     assert 'account-connect-button' in css
-    assert 'What was copied?' in source and 'Show command & instructions' in source and 'Refresh setup' in source
+    assert 'Command & manual copy' in source and 'Show command & instructions' in source and 'Refresh setup' in source
     assert 'Run the Pi sign-in helper in PowerShell' not in source
