@@ -139,6 +139,20 @@ async function startAccountSignin(id,button,feedback,guide){
   guide.open=true;
  }
 }
+async function startAccountOnboarding(id,button,feedback){
+ button.disabled=true;
+ feedback.hidden=false;feedback.textContent='Preparing your private Pi profile on Windows…';
+ try{
+  const result=await send('/api/simple/accounts/start-onboarding',{id});
+  feedback.textContent=result.already_open?'Your setup window is already open. Finish signing in there.':
+   'Setup started on Windows. Complete the Cline sign-in in the opened window; this page will update automatically.';
+  state.onboardingHelp={id,message:feedback.textContent};
+  button.textContent=result.already_open?'Setup already open':'Finish connecting on Windows';
+ }catch(error){
+  feedback.textContent='Setup could not start: '+error.message+'. Try again here; your account slot is saved.';
+  button.disabled=false;button.textContent='Retry account setup';
+ }
+}
 function showSetupFeedback(stage,button,feedback,outcome){
  button.textContent=outcome==='verified'?'Copied to Windows':'Select command';
  feedback.textContent=outcome==='verified'?'Windows text clipboard checked. Open PowerShell, paste the command and complete sign-in. Then refresh setup.':
@@ -152,7 +166,7 @@ function renderAccounts(snap){const box=clear($('accounts'));
  for(const [index,account] of accounts.entries()){
  const row=el('div','account-item'),avatar=el('span','account-avatar',String(index+1)),main=el('div','item-main');
  const hasEmail=account.label&&account.label.includes('@');const ready=state.readiness[account.id];
- const profileState=!ready?'Profile not checked':!ready.profile_exists?'Pi profile missing':
+ const profileState=!ready?'Profile not checked':ready.setup_running&&!ready.cline_saved?'Account setup in progress':!ready.profile_exists?'Pi profile missing':
    !ready.cline_saved?'Pi sign-in missing':'Pi sign-in saved | live login and email unverified';
  const routeState=account.enabled===false?'Not in routing':ready&&!ready.cline_saved?'Enabled in preferences | NOT route-ready':'Enabled in preferences | live route unverified';
  main.append(el('strong','',hasEmail?account.label:'Email not linked'),el('small','',`${account.id} | ${routeState} | ${profileState}`));
@@ -164,20 +178,24 @@ function renderAccounts(snap){const box=clear($('accounts'));
  if(ready&&!ready.cline_saved){
   const stage=ready.profile_exists?'signin':'provision';
   const connect=el('div','account-connect'),label=el('div','connect-label',stage==='signin'?'Next step: sign in to Pi':'Next step: create your Pi profile');
-  const guide=el('details','account-guide'),sum=el('summary','',stage==='signin'?'Copy command instead':'Show command & instructions'),body=el('div','account-guide-body');
+  const guide=el('details','account-guide'),sum=el('summary','','Advanced · manual command'),body=el('div','account-guide-body');
   const feedback=el('p','account-copy-feedback');feedback.setAttribute('role','status');feedback.setAttribute('aria-live','polite');feedback.hidden=true;
   const command=el('textarea','account-command');command.value=accountSetupCommand(account.id,stage);command.readOnly=true;command.rows=3;command.spellcheck=false;command.setAttribute('aria-label','Setup command for '+account.id);
-  body.append(el('p','',stage==='signin'?'If the sign-in window does not open, use this manual fallback on the Windows computer running CMO.':'On your Windows computer, run this setup command in PowerShell. This creates only the isolated profile for this account.'),command);
+  body.append(el('p','',stage==='signin'?'If the sign-in window does not open, use this manual fallback on the Windows computer running CMO.':'If automatic setup does not open, use this manual fallback for this one account.'),command);
   body.append(makeButton('Refresh setup',()=>load(true)));
   body.append(el('p','account-device-note','Copy command writes to the Windows computer running this local dashboard, not to your phone clipboard.'));
   body.append(el('p','account-setup-hint',stage==='signin'?'A saved sign-in does not prove the email identity or free-model quota. Check availability separately.':'Once the profile is created, Refresh setup will show the separate sign-in step.'));
   guide.append(sum,body);
-  const button=makeButton(stage==='signin'?'Start sign-in on Windows':'Copy setup command',
-   ()=>stage==='signin'?startAccountSignin(account.id,button,feedback,guide):copySetupCommand(account.id,stage,button,guide,feedback));
-  if(stage==='signin')body.insertBefore(makeButton('Copy command',()=>copySetupCommand(account.id,stage,copyButton,guide,feedback)),command);
-  const copyButton=stage==='signin'?body.querySelector('button'):null;
+  const button=makeButton(ready.setup_running?'Finish setup in Windows':stage==='signin'?'Start sign-in on Windows':'Start setup on Windows',
+   ()=>stage==='signin'?startAccountSignin(account.id,button,feedback,guide):startAccountOnboarding(account.id,button,feedback));
+  body.insertBefore(makeButton('Copy command instead',()=>copySetupCommand(account.id,stage,copyButton,guide,feedback)),command);
+  const copyButton=body.querySelector('button');
+  if(ready.setup_running){button.disabled=true;feedback.hidden=false;feedback.textContent='Your account setup window is open. Finish Cline sign-in there; this card updates automatically.';}
   button.classList.add('primary','account-connect-button');button.setAttribute('aria-label',`${button.textContent} for ${account.id}`);
-  if(state.signinHelp?.id===account.id&&stage==='signin'){
+  if(state.onboardingHelp?.id===account.id){
+   feedback.hidden=false;feedback.textContent=state.onboardingHelp.message;
+   button.textContent=stage==='signin'?'Finish sign-in on Windows':'Finish connecting on Windows';
+  }else if(state.signinHelp?.id===account.id&&stage==='signin'){
    feedback.hidden=false;feedback.textContent=state.signinHelp.message;button.textContent='Sign-in terminal requested';
   }else if(state.setupHelp?.id===account.id&&state.setupHelp.stage===stage){
    guide.open=true;showSetupFeedback(stage,stage==='signin'?copyButton:button,feedback,state.setupHelp.outcome);
@@ -200,11 +218,34 @@ async function toggleAccount(account){try{await mutateAccount({op:'update',id:ac
 async function moveAccount(accounts,index,delta){const other=accounts[index+delta];if(!other)return;
 try{const doc=JSON.parse(JSON.stringify(state.snap.policy));const mine=doc.accounts.find(a=>a.id===accounts[index].id),theirs=doc.accounts.find(a=>a.id===other.id);[mine.priority,theirs.priority]=[theirs.priority,mine.priority];
 await send('/api/policy',{doc,expected_digest:state.snap.policy.digest,note:'simple dashboard account priority'});tell('Account priority saved for later route decisions.');await load(true);}catch(e){tell('Account priority could not be saved: '+e.message,true);}}
-async function addAccount(event){event.preventDefault();const email=$('new-email').value.trim();const accounts=state.snap.policy.accounts||[];if(accounts.length>=5)return tell('Maximum five accounts.',true);
-const used=new Set(accounts.map(a=>a.id));let id='';for(let i=1;i<=5;i++){if(!used.has(`account-${i}`)){id=`account-${i}`;break;}}if(!id)return tell('No account slot available.',true);
-try{await mutateAccount({op:'add',id,label:email,profile:id,enabled:false,attach_routes:state.saved,note:'simple dashboard add tracked account'});$('new-email').value='';tell(`${id} added as a disabled slot. Use Copy setup command on the new account card. After creating its profile, select Refresh setup to get the sign-in step.`);}catch(e){tell('Account could not be added: '+e.message,true);}}
+async function addAccount(event){
+ event.preventDefault();const form=$('add-account'),submit=form.querySelector('button[type=submit]');
+ const email=$('new-email').value.trim();const accounts=state.snap.policy.accounts||[];
+ if(accounts.length>=5)return tell('Maximum five accounts.',true);
+ if(accounts.some(a=>a.label?.toLowerCase()===email.toLowerCase()))return tell('That email label already belongs to an account.',true);
+ const used=new Set(accounts.map(a=>a.id));let id='';
+ for(let i=1;i<=5;i++){if(!used.has(`account-${i}`)){id=`account-${i}`;break;}}
+ if(!id)return tell('No account slot available.',true);
+ submit.disabled=true;submit.textContent='Adding & preparing…';
+ try{
+  await send('/api/accounts',{op:'add',id,label:email,profile:id,enabled:false,
+   attach_routes:state.saved,note:'guided account onboarding'});
+  $('new-email').value='';
+  await load(true);
+  try{
+   const result=await send('/api/simple/accounts/start-onboarding',{id});
+   state.onboardingHelp={id,message:result.already_open?'Setup window already open. Finish signing in there.':
+    'Your private profile is being prepared on Windows. Complete the Cline browser sign-in when prompted.'};
+   tell(`Account added. Finish the sign-in in the Windows setup window. It remains out of routing until verified.`);
+  }catch(error){
+   tell(`Account saved, but setup could not start: ${error.message}. Use Start setup on its account card to retry.`,true);
+  }
+  await load(true);
+ }catch(error){tell('Account could not be added: '+error.message,true);}
+ finally{submit.disabled=false;submit.textContent='Add & connect account';}
+}
 async function load(preserve=false){if(state.loading)return;state.loading=true;try{const [snap,readiness]=await Promise.all([api('/api/snapshot'),api('/api/simple/accounts/readiness')]);state.snap=snap;state.readiness=Object.fromEntries((readiness.accounts||[]).map(a=>[a.id,a]));state.connected=true;const status=$('connection');status.textContent='Connected';status.className='status good';renderRouter(snap);renderWork(snap);renderAccounts(snap);
 const saved=(snap.policy.routes||[]).filter(r=>r.tier==='free'&&r.enabled!==false).slice(0,4).map(r=>r.model);if(!state.dirty||!preserve){state.selected=[...saved];state.saved=[...saved];state.dirty=false;}else{state.saved=[...saved];state.dirty=JSON.stringify(state.selected)!==JSON.stringify(saved);}state.catalog=[...new Set([...state.catalog,...saved])];renderModels();}
 catch(e){state.connected=false;const status=$('connection');status.textContent='Disconnected';status.className='status bad';tell('Connection lost. Saved information may be stale. Changes are disabled until the service responds.',true);$('save-models').disabled=true;}finally{state.loading=false;}}
 $('refresh').addEventListener('click',()=>load(true));$('save-models').addEventListener('click',saveModels);$('add-account').addEventListener('submit',addAccount);
-load().then(loadCatalog);setInterval(()=>load(true),15000);
+load().then(loadCatalog);setInterval(()=>load(true),5000);

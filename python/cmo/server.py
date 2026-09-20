@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, urlparse
 from . import SCHEMA_NAME, SCHEMA_VERSION, __version__
 from .catalog import DEFAULT_CATALOG_URL, refresh_catalog, fetch_catalog
 from .account_clipboard import command_for, copy_native_text
+from .account_onboarding import launch_account_onboarding
 from .account_signin import launch_account_signin
 from .db import connect, get_meta
 from .events import EventStore, EventValidationError, EventConflictError, ms_to_iso
@@ -225,6 +226,8 @@ class CmoHandler(BaseHTTPRequestHandler):
                 self._copy_account_command(body)
             elif path == "/api/simple/accounts/start-signin":
                 self._start_account_signin(body)
+            elif path == "/api/simple/accounts/start-onboarding":
+                self._start_account_onboarding(body)
             elif path == "/api/simple/models":
                 self._save_simple_models(body)
             elif path == "/api/policy":
@@ -568,6 +571,48 @@ class CmoHandler(BaseHTTPRequestHandler):
                    {"ok": copied, "confirmed": copied,
                     "message": "Windows clipboard verified" if copied else "Windows clipboard unavailable"})
 
+    def _start_account_onboarding(self, body: Any) -> None:
+        """Explicit local click: provision then authenticate one disabled registered slot."""
+        origin = self.headers.get("Origin", "")
+        host = self.headers.get("Host", "")
+        if (not origin or origin.lower() != ("http://" + host).lower()
+                or self.headers.get("Content-Type", "").split(";")[0].lower() != "application/json"
+                or self.headers.get("Sec-Fetch-Site", "same-origin") != "same-origin"):
+            self._json(403, {"error": "same-origin JSON request required"})
+            return
+        from .account_clipboard import ACCOUNT
+        if (not isinstance(body, dict) or set(body) != {"id"}
+                or not isinstance(body["id"], str) or not ACCOUNT.fullmatch(body["id"])):
+            raise EventValidationError("invalid account onboarding request")
+        account = body["id"]
+        with self.service.store() as store:
+            policy, _, _ = store.active_policy_doc()
+        matches = [a for a in policy.get("accounts", []) if a.get("id") == account]
+        if len(matches) != 1 or matches[0].get("profile", account) != account:
+            raise EventValidationError("unknown or ambiguous account")
+        if matches[0].get("enabled") is not False:
+            self._json(409, {"error": "account must stay disabled during onboarding"})
+            return
+        agent = Path(os.environ.get("PI_PROFILE_ROOT", "").strip() or
+                     str(Path.home() / ".pi" / "supervisor-accounts")) / account / "agent"
+        if (agent / "auth.json").is_file():
+            self._json(409, {"error": "existing auth found; refresh account status"})
+            return
+        with self.service.login_lock:
+            existing = self.service.login_processes.get(account)
+            if existing is not None and existing.poll() is None:
+                self._json(202, {"ok": True, "started": False, "already_open": True,
+                                 "message": "Account setup terminal already open"})
+                return
+            try:
+                process = launch_account_onboarding(account)
+            except (OSError, ValueError, FileNotFoundError):
+                self._json(503, {"error": "Windows account setup unavailable; try again later"})
+                return
+            self.service.login_processes[account] = process
+        self._json(202, {"ok": True, "started": True, "already_open": False,
+                         "message": "Account setup opened; complete provider sign-in on Windows"})
+
     def _start_account_signin(self, body: Any) -> None:
         """Launch the isolated Pi sign-in terminal on an explicit same-origin click."""
         origin = self.headers.get("Origin", "")
@@ -643,7 +688,11 @@ class CmoHandler(BaseHTTPRequestHandler):
                                      if isinstance(document.get(key), dict)}
             except (OSError, ValueError, UnicodeError):
                 providers = set()
+            with self.service.login_lock:
+                active = self.service.login_processes.get(alias)
+                setup_running = active is not None and active.poll() is None
             accounts.append({"id": alias, "profile_exists": agent.is_dir(),
+                             "setup_running": setup_running,
                              "cline_saved": "cline" in providers,
                              "pass_saved": "cline-pass" in providers,
                              "checked_at": int(time.time() * 1000),
