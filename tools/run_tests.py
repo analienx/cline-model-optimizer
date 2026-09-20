@@ -22,6 +22,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 MODULES = ("tests.test_cmo_core", "tests.test_cmo_http", "tests.test_cmo_compat")
+PYTEST_FILES = ("tests/test_quarantine_recheck.py", "tests/test_snapshot_truth.py",
+                "tests/test_recheck_worker.py")
 
 for _extra in (str(REPO), str(REPO / "python")):
     if _extra not in sys.path:
@@ -70,21 +72,74 @@ def run_offline() -> dict:
     result = runner.run(suite)
     stream.close()
     records = sorted(result.records, key=lambda r: r["id"])
+    totals = {
+        "run": result.testsRun,
+        "passed": sum(1 for r in records if r["outcome"] == "pass"),
+        "failed": len(result.failures),
+        "errors": len(result.errors),
+        "skipped": len(result.skipped),
+    }
+    records += run_pytest_files(started)
+    totals["run"] = len(records)
+    totals["passed"] = sum(1 for r in records if r["outcome"] == "pass")
+    totals["failed"] = sum(1 for r in records if r["outcome"] == "fail")
+    totals["errors"] = sum(1 for r in records if r["outcome"] == "error")
+    totals["skipped"] = sum(1 for r in records if r["outcome"] == "skip")
+    ok = totals["failed"] == 0 and totals["errors"] == 0 and totals["run"] > 0
+    records = sorted(records, key=lambda r: r["id"])
     return {
         "schema": "cmo.test-report/v1",
-        "suite": list(MODULES),
+        "suite": list(MODULES) + ["pytest:" + f for f in PYTEST_FILES],
         "python": sys.version.split()[0],
         "duration_ms": int((time.time() - started) * 1000),
-        "totals": {
-            "run": result.testsRun,
-            "passed": sum(1 for r in records if r["outcome"] == "pass"),
-            "failed": len(result.failures),
-            "errors": len(result.errors),
-            "skipped": len(result.skipped),
-        },
-        "ok": bool(result.wasSuccessful()),
+        "totals": totals,
+        "ok": ok,
         "tests": records,
     }
+
+
+def run_pytest_files(started: float) -> list[dict]:
+    """Collect pytest-file results (fixture quarantine, snapshot truth, worker)."""
+    try:
+        import pytest  # noqa: F401
+    except ImportError:
+        return [{"id": f"pytest:{name} (not collected: pytest missing)",
+                 "outcome": "skip", "duration_ms": 0, "detail": "pytest not installed"}
+                for name in PYTEST_FILES]
+    records: list[dict] = []
+    collected: list[str] = []
+
+    class _Plugin:
+        def pytest_runtest_logreport(self, report):
+            if report.when != "call" and not (report.when == "setup" and report.skipped):
+                return
+            if report.when == "setup" and report.skipped:
+                outcome, detail = "skip", str(report.longrepr)
+            elif report.passed:
+                outcome, detail = "pass", ""
+            elif report.skipped:
+                outcome, detail = "skip", str(report.longrepr)
+            elif report.failed:
+                outcome = "error" if "Error" in str(report.longrepr)[:500] else "fail"
+                detail = str(report.longrepr)[-2000:]
+            else:
+                return
+            records.append({"id": f"pytest:{report.nodeid}", "outcome": outcome,
+                            "duration_ms": 0, "detail": detail})
+            collected.append(report.nodeid)
+
+    existing = [str(REPO / name) for name in PYTEST_FILES
+                if (REPO / name).exists()]
+    if not existing:
+        return []
+    import pytest as _pytest
+    t0 = time.time()
+    _pytest.main(["-q", "--no-header", "-p", "no:cacheprovider"] + existing,
+                 plugins=[_Plugin()])
+    elapsed = max(1, int((time.time() - t0) * 1000 / max(1, len(records))))
+    for record in records:
+        record["duration_ms"] = elapsed
+    return records
 
 
 def run_browser(artifacts: Path) -> dict:

@@ -39,7 +39,8 @@ EVENT_TYPES = {
     "route.probe.started", "route.probe.succeeded", "route.probe.failed",
     "attempt.started", "attempt.heartbeat", "attempt.completed", "attempt.failed",
     "catalog.refreshed", "catalog.failed",
-    "route.recheck.requested",
+    "route.recheck.requested", "route.recheck.started", "route.recheck.succeeded",
+    "route.recheck.failed", "route.recheck.blocked",
     "override.created", "override.cleared", "override.expired",
     "service.heartbeat",
 }
@@ -58,6 +59,8 @@ GOAL_STATUS = {
 
 _ROUTE_EVENTS = {
     "route.probe.started", "route.probe.succeeded", "route.probe.failed",
+    "route.recheck.started", "route.recheck.succeeded", "route.recheck.failed",
+    "route.recheck.blocked",
     "attempt.started", "attempt.heartbeat", "attempt.completed", "attempt.failed",
 }
 
@@ -81,6 +84,71 @@ class EventConflictError(ValueError):
 
 
 def now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+# Sources that only ever produce synthetic evidence. Rows from these sources
+# must never shape live route state; see ``is_test_db`` and
+# ``migration.quarantine_fixtures``.
+FIXTURE_SOURCES = frozenset({
+    "browser-acceptance", "fixture", "synthetic-fixture", "goal-42-harness",
+})
+
+FIXTURE_GOAL_IDS = frozenset({"goal-42"})
+
+# Single-character route identities are the signature of the truncated
+# browser-acceptance fixture (account "a", model "m").
+TRUNCATED_IDENTITIES = frozenset({"a", "m"})
+
+
+def is_test_db(db_path: str | Path) -> bool:
+    """True only when the database is provably an isolated test database.
+
+    Both conditions must hold: ``CMO_TEST_MODE=isolated`` in the environment
+    *and* a db path that is clearly isolated (a temp dir, or a filename
+    containing ``test`` or ``isolated``). Anything else is a live database
+    and fixture evidence is rejected there.
+    """
+    import os
+    import tempfile
+    if os.environ.get("CMO_TEST_MODE") != "isolated":
+        return False
+    text = str(db_path).lower().replace("\\", "/")
+    if "test" in text or "isolated" in text:
+        return True
+    try:
+        tmp = os.path.realpath(tempfile.gettempdir()).lower().replace("\\", "/")
+        real = os.path.realpath(str(db_path)).lower().replace("\\", "/")
+        if real == tmp or real.startswith(tmp.rstrip("/") + "/"):
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _reject_fixture_evidence(event: dict[str, Any], db_path: str | Path) -> None:
+    """Reject synthetic/fixture evidence on live databases.
+
+    Raises :class:`EventValidationError` when a fixture source, fixture goal
+    id, or truncated route identity targets a non-test database. Isolated
+    test databases (see :func:`is_test_db`) still accept them so the browser
+    acceptance suite keeps working against throwaway state.
+    """
+    if is_test_db(db_path):
+        return
+    source = event.get("source_component")
+    if source in FIXTURE_SOURCES:
+        raise EventValidationError(
+            f"fixture source {source!r} is not accepted on the live evidence store")
+    if event.get("goal_id") in FIXTURE_GOAL_IDS:
+        raise EventValidationError(
+            "fixture goal_id 'goal-42' is not accepted on the live evidence store")
+    if event.get("event_type") in _ROUTE_EVENTS:
+        account = event.get("account_alias") or ""
+        model = event.get("model") or ""
+        if account in TRUNCATED_IDENTITIES or model in TRUNCATED_IDENTITIES:
+            raise EventValidationError(
+                "truncated route identity is not accepted on the live evidence store")
     return int(time.time() * 1000)
 
 
@@ -274,6 +342,7 @@ class EventStore:
 
     def ingest(self, raw: dict[str, Any]) -> dict[str, Any]:
         event = normalize_event(raw)
+        _reject_fixture_evidence(event, self.db_path)
         digest = payload_hash(event)
         received = now_ms()
 
@@ -420,20 +489,76 @@ def apply_event(conn: sqlite3.Connection, event: dict[str, Any],
     if etype == "override.created":
         return _apply_override_created(conn, event)
     if etype == "route.recheck.requested":
-        route_key_value = event.get("route_key")
-        if not route_key_value:
-            return "noop"
-        conn.execute(
-            "INSERT INTO recheck_requests(request_id, route_key, requested_at, requested_by, "
-            "status, reason) VALUES(?,?,?,?, 'pending', ?) ON CONFLICT(request_id) DO NOTHING",
-            (event["event_id"], route_key_value, event["occurred_at"],
-             event.get("source_component") or "ui", event.get("safe_detail")))
-        return "applied"
+        return _apply_recheck_requested(conn, event)
+    if etype == "route.recheck.started":
+        return _apply_recheck_started(conn, event)
+    if etype in ("route.recheck.succeeded", "route.recheck.failed",
+                 "route.recheck.blocked"):
+        return _apply_recheck_settled(conn, event, received)
     if etype in ("override.cleared", "override.expired"):
         return _apply_override_cleared(conn, event)
     if etype == "service.heartbeat":
         return _apply_service_heartbeat(conn, event)
     return "noop"
+
+
+def _apply_recheck_requested(conn: sqlite3.Connection, event: dict[str, Any]) -> str:
+    """Queue a recheck request; duplicate pending rows for a route collapse."""
+    route_key_value = event.get("route_key")
+    if not route_key_value:
+        return "noop"
+    existing = conn.execute(
+        "SELECT request_id FROM recheck_requests WHERE route_key=? AND status='pending'",
+        (route_key_value,)).fetchone()
+    if existing is not None:
+        return "duplicate"
+    conn.execute(
+        "INSERT INTO recheck_requests(request_id, route_key, requested_at, requested_by, "
+        "status, reason) VALUES(?,?,?,?, 'pending', ?) ON CONFLICT(request_id) DO NOTHING",
+        (event["event_id"], route_key_value, event["occurred_at"],
+         event.get("source_component") or "ui", event.get("safe_detail")))
+    return "applied"
+
+
+def _apply_recheck_started(conn: sqlite3.Connection, event: dict[str, Any]) -> str:
+    route_key_value = event.get("route_key")
+    if not route_key_value:
+        return "noop"
+    row = conn.execute(
+        "SELECT request_id FROM recheck_requests WHERE route_key=? AND status='pending' "
+        "ORDER BY requested_at ASC LIMIT 1", (route_key_value,)).fetchone()
+    if row is None:
+        return "noop"
+    conn.execute(
+        "UPDATE recheck_requests SET status='running', started_at=?, attempt=attempt+1 "
+        "WHERE request_id=?", (event["occurred_at"], row["request_id"]))
+    return "applied"
+
+
+def _apply_recheck_settled(conn: sqlite3.Connection, event: dict[str, Any],
+                           received: int) -> str:
+    outcome = {"route.recheck.succeeded": "finished:succeeded",
+               "route.recheck.failed": "finished:failed",
+               "route.recheck.blocked": "finished:blocked"}[event["event_type"]]
+    route_key_value = event.get("route_key")
+    if not route_key_value:
+        return "noop"
+    row = conn.execute(
+        "SELECT request_id FROM recheck_requests WHERE route_key=? AND status='running' "
+        "ORDER BY started_at ASC LIMIT 1", (route_key_value,)).fetchone()
+    if row is None:
+        return "noop"
+    conn.execute(
+        "UPDATE recheck_requests SET status=?, finished_at=?, last_error=? "
+        "WHERE request_id=?",
+        (outcome, event["occurred_at"],
+         event.get("reason_code") or event.get("safe_detail"), row["request_id"]))
+    # A settled recheck is real observation: let it move route state too.
+    if event["event_type"] == "route.recheck.succeeded":
+        return _apply_route_success(conn, event, received)
+    if event["event_type"] == "route.recheck.failed":
+        return _apply_route_failure(conn, event, received)
+    return "applied"
 
 
 def _ensure_route_row(conn: sqlite3.Connection, event: dict[str, Any],

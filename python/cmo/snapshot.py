@@ -72,6 +72,15 @@ def build_snapshot(store: Any, *, now: int | None = None,
             pass
 
     active_overrides = {(o.get("route_key")): o for o in overrides}
+    try:
+        recheck_rows = store.recheck_requests(status="running") + \
+            store.recheck_requests(status="pending")
+    except Exception:
+        recheck_rows = []
+    recheck_by_route = {}
+    for req in recheck_rows:
+        recheck_by_route.setdefault(req.get("route_key"), req)
+    goals = _derive_goal_liveness(goals, now)
     active_attempts: dict[str, dict[str, Any]] = {}
     for attempt in attempts:
         if attempt.get("status") != "running":
@@ -88,7 +97,8 @@ def build_snapshot(store: Any, *, now: int | None = None,
     for cell in route_cells(policy):
         row = state_by_key.get(cell["route_key"], {})
         cells.append(_build_cell(cell, row, now, ttl, active_overrides, active_attempts,
-                                 catalog, catalog_fresh, defaults))
+                                 catalog, catalog_fresh, defaults,
+                                 recheck_by_route=recheck_by_route))
 
     selected_goal = _select_goal(goals, goal_id)
     effective_strategy = strategy or (selected_goal or {}).get("effective_strategy") \
@@ -125,6 +135,7 @@ def build_snapshot(store: Any, *, now: int | None = None,
         "freshness": {
             "evidence_ttl_ms": ttl,
             "browser_clock_ms": int(defaults["browser_freshness_ms"]),
+            "browser_freshness_ms": int(defaults["browser_freshness_ms"]),
             "evaluated_at": now,
             "catalog_status": catalog_status,
             "catalog_seen_at": catalog_seen or None,
@@ -134,6 +145,7 @@ def build_snapshot(store: Any, *, now: int | None = None,
         },
         "goals": goals,
         "selected_goal_id": (selected_goal or {}).get("goal_id"),
+        "data_quality": _data_quality(store, now),
         "attempts": attempts,
         "free_matrix": _free_matrix(policy, cells),
         "subscription": [c for c in cells if c["tier"] == TIER_SUBSCRIPTION],
@@ -146,6 +158,75 @@ def build_snapshot(store: Any, *, now: int | None = None,
     }
 
 
+def _derive_goal_liveness(goals: list[dict[str, Any]], now: int) -> list[dict[str, Any]]:
+    """Derive display liveness for goals without rewriting stored status.
+
+    A goal still stored as ``active`` but with no heartbeat/session activity
+    beyond ``DISCONNECTED_AFTER_MS`` is shown as ``disconnected`` so the
+    dashboard never presents a stale goal as live. The stored row is left
+    untouched; callers must emit a real ``goal.disconnected`` event to change it.
+    """
+    derived = []
+    for goal in goals:
+        view = dict(goal)
+        last = (view.get("last_activity_at") or view.get("updated_at")
+                or view.get("started_at") or 0)
+        view["last_activity_age_ms"] = (now - int(last)) if last else None
+        view["liveness"] = "live"
+        if view.get("status") == "active" and last \
+                and now - int(last) > DISCONNECTED_AFTER_MS and not view.get("session_ref"):
+            view["liveness"] = "disconnected"
+            view["display_status"] = "disconnected"
+        else:
+            view["display_status"] = view.get("status")
+        derived.append(view)
+    return derived
+
+
+def _data_quality(store: Any, now: int) -> dict[str, Any]:
+    """Summarize evidence provenance so fixture data can never pass as live.
+
+    Counts events by source family. Sources used by browser acceptance and
+    synthetic harnesses are reported separately as ``fixture_events``; the
+    ``banner`` is non-null when such rows exist in the live database and they
+    must be quarantined (see ``migration.quarantine_fixtures``) before the
+    dashboard can be treated as trustworthy.
+    """
+    fixture_sources = ("browser-acceptance", "fixture", "synthetic-fixture",
+                       "goal-42-harness")
+    counts: dict[str, int] = {}
+    fixture_events = 0
+    truncated_identities = 0
+    try:
+        rows = store.events(limit=5000)
+    except Exception:
+        rows = []
+    for event in rows:
+        source = event.get("source_component") or "unknown"
+        counts[source] = counts.get(source, 0) + 1
+        if source in fixture_sources or event.get("goal_id") == "goal-42":
+            fixture_events += 1
+        account = event.get("account_alias") or ""
+        model = event.get("model") or ""
+        if event.get("event_type", "").startswith(("route.", "attempt.")) and \
+                (account in ("a",) or model in ("m",)):
+            truncated_identities += 1
+    banner = None
+    if fixture_events:
+        banner = (f"{fixture_events} fixture/synthetic event(s) are present in the live "
+                  "evidence store; route states derived from them are not trustworthy. "
+                  "Run fixture quarantine before relying on this dashboard.")
+    elif truncated_identities:
+        banner = (f"{truncated_identities} event(s) carry truncated route identities; "
+                  "affected cells cannot be trusted until the source is fixed.")
+    return {
+        "sources": counts,
+        "fixture_events": fixture_events,
+        "truncated_identities": truncated_identities,
+        "banner": banner,
+    }
+
+
 def _select_goal(goals: list[dict[str, Any]], goal_id: str | None) -> dict[str, Any] | None:
     if goal_id:
         for goal in goals:
@@ -153,6 +234,9 @@ def _select_goal(goals: list[dict[str, Any]], goal_id: str | None) -> dict[str, 
                 return goal
     active = [g for g in goals if g.get("status") in ("active", "paused", "blocked",
                                                       "disconnected")]
+    live = [g for g in active if g.get("liveness", "live") == "live"]
+    if live:
+        return live[0]
     if active:
         return active[0]
     return goals[0] if goals else None
@@ -162,7 +246,8 @@ def _build_cell(cell: dict[str, str], row: dict[str, Any], now: int, ttl: int,
                 overrides: dict[str, dict[str, Any]],
                 active_attempts: dict[str, dict[str, Any]],
                 catalog: dict[str, str], catalog_fresh: bool,
-                defaults: dict[str, Any]) -> dict[str, Any]:
+                defaults: dict[str, Any],
+                recheck_by_route: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     state = (row.get("state") or "UNKNOWN").upper()
     observed = row.get("observed_at")
     age = (now - int(observed)) if observed else None
@@ -220,7 +305,46 @@ def _build_cell(cell: dict[str, str], row: dict[str, Any], now: int, ttl: int,
         "manual_override": bool(override),
         "manual_override_reason": (override.get("reason") if override else None),
         "manual_override_expires_at": (override.get("expires_at") if override else None),
+        "unknown_reason": _unknown_reason(state, row, age, ttl, catalog_fresh,
+                                            catalog_capability),
+        "recheck": _recheck_view((recheck_by_route or {}).get(cell["route_key"])),
     }
+
+
+def _recheck_view(request: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not request:
+        return None
+    return {
+        "request_id": request.get("request_id"),
+        "status": request.get("status"),
+        "requested_at": request.get("requested_at"),
+        "requested_by": request.get("requested_by"),
+        "reason": request.get("reason") or request.get("last_error"),
+    }
+
+
+def _unknown_reason(state: str, row: dict[str, Any], age: int | None, ttl: int,
+                    catalog_fresh: bool, catalog_capability: str | None) -> str | None:
+    """Explain *why* a route has no usable evidence instead of bare UNKNOWN."""
+    if state not in ("UNKNOWN", "STALE", "QUOTA_EXPIRED"):
+        return None
+    source = row.get("evidence_source") if row else None
+    if source in ("browser-acceptance", "fixture", "synthetic-fixture",
+                  "goal-42-harness"):
+        return ("evidence comes from a synthetic/fixture source; "
+                "quarantine fixture data before trusting this route")
+    if not row or not row.get("observed_at"):
+        if row and row.get("auth_pending"):
+            return "account sign-in not completed; no provider observation exists yet"
+        return "never observed: no probe or attempt evidence recorded for this route"
+    if age is not None and age > ttl:
+        return ("evidence expired: last observation is older than the evidence TTL; "
+                "request a recheck to refresh it")
+    if catalog_fresh and catalog_capability == "unavailable":
+        return "provider catalog reports this model as unavailable"
+    if not source:
+        return "observation has no recorded source; provenance unknown"
+    return None
 
 
 def _free_matrix(policy: dict[str, Any],

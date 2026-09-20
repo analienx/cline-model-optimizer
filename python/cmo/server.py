@@ -18,7 +18,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from . import SCHEMA_NAME, SCHEMA_VERSION, __version__
-from .catalog import DEFAULT_CATALOG_URL, fetch_catalog
+from .catalog import DEFAULT_CATALOG_URL, refresh_catalog
+from .recheck import RecheckWorker
 from .db import connect, get_meta
 from .events import EventStore, EventValidationError, EventConflictError, ms_to_iso
 from .policy import load_canonical_policy, policy_digest
@@ -351,28 +352,14 @@ class CmoHandler(BaseHTTPRequestHandler):
             })
 
     def _refresh_catalog(self) -> None:
-        timestamp = int(time.time() * 1000)
-        try:
-            catalog = fetch_catalog(self.service.catalog_url)
-            models = [{"model": model, "capability": capability}
-                      for model, capability in sorted(catalog["models"].items())]
-            with self.service.store() as store:
-                store.ingest({
-                    "event_type": "catalog.refreshed", "occurred_at": timestamp,
-                    "source_component": "cmo", "reason_code": "catalog.refreshed",
-                    "safe_detail": json.dumps({"models": models}),
-                })
-            self._json(200, {"ok": True, "models": len(models),
-                             "source_url": catalog["source_url"]})
-        except Exception as exc:
-            with self.service.store() as store:
-                store.ingest({
-                    "event_type": "catalog.failed", "occurred_at": timestamp,
-                    "source_component": "cmo", "reason_code": "catalog.failed",
-                    "safe_detail": f"{type(exc).__name__}: {exc}",
-                })
-            self._json(200, {"ok": False, "error": type(exc).__name__,
-                             "detail": str(exc)[:200]})
+        with self.service.store() as store:
+            outcome = refresh_catalog(store, self.service.catalog_url)
+        if outcome["ok"]:
+            self._json(200, {"ok": True, "models": outcome["models"],
+                             "source_url": outcome["source_url"]})
+        else:
+            self._json(200, {"ok": False, "error": outcome["error"],
+                             "detail": outcome.get("detail", "")})
 
     def _request_recheck(self, body: Any) -> None:
         if not isinstance(body, dict) or not body.get("route_key"):
@@ -459,9 +446,12 @@ def serve(db_path: str | Path, host: str = "127.0.0.1", port: int = 4311,
         if artifact_digest:
             store.set_meta("service_artifact_digest", artifact_digest)
     httpd = CmoServer((host, port), service)
+    worker = RecheckWorker(db_path, catalog_url=catalog_url)
+    worker.start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:  # pragma: no cover
         pass
     finally:
+        worker.stop()
         httpd.server_close()

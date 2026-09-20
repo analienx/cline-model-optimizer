@@ -168,8 +168,9 @@ function renderVitals(snap) {
   const box = $("vitals");
   clear(box);
   const fresh = snap.freshness;
+  const freshnessMs = fresh.browser_freshness_ms || fresh.browser_clock_ms;
   const evaluatedAge = Date.now() - snap.generated_at - S.serverSkewMs;
-  const staleWindow = fresh.browser_freshness_ms * 2;
+  const staleWindow = (freshnessMs || 0) * 2;
   const catalogAge = fresh.catalog_seen_at ? Date.now() - fresh.catalog_seen_at - S.serverSkewMs : null;
 
   const servicePill = { connected: "pill-ok", degraded: "pill-warn", offline: "pill-bad" }[snap.service.status] || "pill-unknown";
@@ -183,7 +184,7 @@ function renderVitals(snap) {
     ["State revision", String(snap.state_revision), `evaluated ${fmtAge(evaluatedAge)}`, evaluatedAge > staleWindow ? "pill-warn" : "pill-ok"],    ["Catalog", fresh.catalog_status, `seen ${fmtAge(catalogAge)} · ${snap.catalog.length} model(s)`, catalogPill],
     ["Policy", `v${snap.policy.policyVersion}`, `owner ${snap.policy.owner} · PAYG ${snap.policy.neverPayg ? "impossible" : "POSSIBLE"}`, snap.policy.neverPayg ? "pill-ok" : "pill-bad"],
     ["Artifact", shortDigest(snap.service.artifact_digest), `installed ${shortDigest(snap.installed_artifact_digest)} · ${artifactOk ? "matches" : "MISMATCH"}`, artifactOk ? "pill-ok" : "pill-bad"],
-    ["Evidence TTL", `${Math.round(fresh.evidence_ttl_ms / 1000)}s`, `browser freshness ${Math.round(fresh.browser_freshness_ms / 1000)}s`, "pill-unknown"],
+    ["Evidence TTL", `${Math.round(fresh.evidence_ttl_ms / 1000)}s`, `browser freshness ${freshnessMs ? Math.round(freshnessMs / 1000) + "s" : "unknown"}`, "pill-unknown"],
   ];
   for (const [k, v, d, pill] of items) {
     const value = el("div", { class: "v" }, [String(v)]);
@@ -201,6 +202,8 @@ function renderVitals(snap) {
   }
   if (evaluatedAge > staleWindow) {
     showBanner(`Displayed status is ${fmtAge(evaluatedAge)} old — outside the ${Math.round(staleWindow / 1000)}s freshness window.`, "warn");
+  } else if (snap.data_quality && snap.data_quality.banner) {
+    showBanner(snap.data_quality.banner, "warn");
   } else if (!S.error) {
     showBanner(null);
   }
@@ -211,8 +214,9 @@ function renderGoalSelect(snap) {
   clear(goalSelect);
   goalSelect.append(el("option", { value: "" }, ["auto (most recent active)"]));
   for (const g of snap.goals) {
+    const live = g.liveness === "disconnected" ? " (stale, no heartbeat)" : "";
     goalSelect.append(el("option", { value: g.goal_id },
-      [`${g.status}: ${g.goal_id.slice(0, 22)}${g.goal_id.length > 22 ? "…" : ""}`]));
+      [`${g.display_status || g.status}: ${g.goal_id.slice(0, 22)}${g.goal_id.length > 22 ? "…" : ""}${live}`]));
   }
   goalSelect.value = current || S.goalId || "";
 }
@@ -226,6 +230,10 @@ function cellNode(cell) {
   if (cell.in_use) parts.push(el("span", { class: "badge badge-inuse", text: cell.in_use_liveness === "live" ? "IN USE" : "IN USE (stale)" }));
   if (cell.manual_override) parts.push(el("span", { class: "badge badge-override", text: "FORCE SKIP" }));
   if (cell.state === "STALE") parts.push(el("span", { class: "badge badge-stale", text: "STALE" }));
+  if (cell.recheck && cell.recheck.status) {
+    const label = cell.recheck.status === "running" ? "RECHECK RUNNING" : `RECHECK ${String(cell.recheck.status).toUpperCase()}`;
+    parts.push(el("span", { class: "badge badge-recheck", text: label }));
+  }
   const detail = [
     `route ${cell.route_key}`,
     `state ${cell.state}${cell.stored_state !== cell.state ? ` (stored ${cell.stored_state})` : ""}`,
@@ -234,6 +242,8 @@ function cellNode(cell) {
     cell.reset_at_iso ? `reset at ${cell.reset_at_iso}` : null,
     cell.next_check_at_iso ? `next check ${cell.next_check_at_iso}` : null,
     cell.last_reason_code ? `reason ${cell.last_reason_code}` : null,
+    cell.unknown_reason ? `why unknown: ${cell.unknown_reason}` : null,
+    cell.recheck && cell.recheck.status ? `recheck ${cell.recheck.status}${cell.recheck.reason ? `: ${cell.recheck.reason}` : ""}` : null,
     cell.evidence_source ? `evidence source ${cell.evidence_source}` : null,
     cell.manual_override_reason ? `override: ${cell.manual_override_reason}` : null,
   ].filter(Boolean).join("\n");
@@ -243,6 +253,7 @@ function cellNode(cell) {
     onclick: () => requestRecheck(cell),
   }, ["recheck"]);
   wrap.append(document.createElement("br"), recheck);
+  if (cell.unknown_reason) wrap.append(el("div", { class: "unknown-why", text: cell.unknown_reason }));
   return wrap;
 }
 
@@ -388,15 +399,19 @@ function renderGoals(snap) {
     return;
   }
   box.append(el("ul", { class: "plain" }, snap.goals.map(g => {
+    const shown = g.display_status || g.status;
+    const lastActivity = g.last_activity_at || g.updated_at || g.started_at;
     const items = [
-      el("div", {}, [el("strong", { text: g.goal_id }), el("span", { class: `status-${g.status}`, text: ` · ${g.status}` })]),
+      el("div", {}, [el("strong", { text: g.goal_id }), el("span", { class: `status-${g.status}`, text: ` · ${shown}` }),
+        g.liveness === "disconnected" ? el("span", { class: "badge badge-stale", text: "NO HEARTBEAT" }) : null]),
       el("div", { class: "kv" }, [
         el("dt", { text: "repo" }), el("dd", { text: g.repo || "—" }),
         el("dt", { text: "strategy" }), el("dd", { text: `${g.strategy || "—"}${g.effective_strategy ? " → " + g.effective_strategy : ""}` }),
         el("dt", { text: "free_only" }), el("dd", { text: g.free_only ? "yes" : "no" }),
-        el("dt", { text: "work_state" }), el("dd", { text: g.work_state || "—" }),
-        el("dt", { text: "last event" }), el("dd", { text: fmtAge(g.last_event_at ? Date.now() - g.last_event_at - S.serverSkewMs : null) }),
-        el("dt", { text: "context" }), el("dd", { text: g.context_escalated ? "escalated to subscription" : "normal" }),
+        el("dt", { text: "session" }), el("dd", { text: g.session_ref || "none recorded" }),
+        el("dt", { text: "attempts" }), el("dd", { text: String(g.attempt_count || 0) }),
+        el("dt", { text: "last activity" }), el("dd", { text: lastActivity ? `${fmtClock(lastActivity)} (${fmtAge(Date.now() - lastActivity - S.serverSkewMs)})` : "never" }),
+        el("dt", { text: "reason" }), el("dd", { text: g.reason_code || "—" }),
       ]),
     ];
     if (g.objective) items.push(el("div", { class: "meta", text: g.objective.slice(0, 220) }));
