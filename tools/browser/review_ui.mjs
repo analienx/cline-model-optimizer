@@ -23,8 +23,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const REQUIRED_TEXT = {
   "service freshness panel": /Service & evidence freshness/,
-  "route decision panel": /Route decision/,
-  "free matrix panel": /Pi free route matrix/,
+  "route decision panel": /Next route/,
+  "free matrix panel": /Free route status/,
   "subscription panel": /ClinePass subscription tail/,
   "catalog panel": /Catalog evidence/,
   "auth panel": /Auth evidence/,
@@ -137,8 +137,12 @@ async function main() {
         title: document.title, lang: document.documentElement.lang,
         stream: document.getElementById('stream')?.textContent,
         stateRevision: window.__cmoSnapshot?.state_revision,
+        catalogModels: window.__cmoSnapshot?.catalog?.length ?? 0,
+        modelOptions: document.getElementById("model-add-select")?.options.length ?? 0,
       };
     })()`);
+    if (structure.catalogModels < 1) failures.push("provider catalog is empty in live browser");
+    if (structure.catalogModels > 0 && structure.modelOptions < 1) failures.push("catalog populated but Add Model selector is empty");
     if (structure.unlabelledControls > 0) failures.push(`${structure.unlabelledControls} control(s) lack an accessible name`);
     if (structure.captions < 3) failures.push("expected at least 3 table captions");
     if (structure.skipLinks < 1) failures.push("missing skip link");
