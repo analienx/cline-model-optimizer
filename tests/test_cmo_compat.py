@@ -26,6 +26,7 @@ from support import StoreCase, env_for_state_root  # noqa: E402
 from cmo import __version__  # noqa: E402
 from cmo.cli import main as cli_main  # noqa: E402
 from cmo.compat import write_compatibility_exports  # noqa: E402
+from cmo.events import EventStore  # noqa: E402
 from cmo.migration import migrate  # noqa: E402
 from cmo.snapshot import build_snapshot  # noqa: E402
 
@@ -175,6 +176,69 @@ class CompatibilityExportTests(StoreCase):
         self.assertEqual(live["bestAvailable"],
                          "cline-free/muse-spark-1.3-contributor@account-2")
         self.assertIn("z-ai/glm-5.3-flash", live["ineligibleModels"])
+
+    def test_status_block_and_guardian_status_reflect_the_live_decision(self) -> None:
+        """Regression: the compat exports must read the decision's real shape.
+
+        The decision carries the chosen leg under ``route`` (None when BLOCKED)
+        with reason_code/reason at top level; there is no ``selected`` or
+        ``blocked_reason`` key. These exports previously read those phantom keys
+        and always emitted nulls.
+        """
+        snapshot = build_snapshot(self.store)
+        decision = snapshot["decision"]
+        self.assertEqual(decision["action"], "LAUNCH")
+        route_key = decision["route"]["route_key"]
+        status = self.payload("model-routing.json")["status"]
+        self.assertEqual(status["decision"], "LAUNCH")
+        self.assertEqual(status["selectedRouteKey"], route_key)
+        self.assertEqual(status["reasonCode"], decision["reason_code"])
+        guardian = self.payload("guardian-status.json")
+        self.assertEqual(guardian["Status"], "OK-FREE-OPTIMAL")
+        act = guardian["Act"]
+        self.assertEqual(act["Tier"], "FREE")
+        self.assertEqual(act["Provider"], "cline")
+        self.assertEqual(act["Model"],
+                         "cline-free/muse-spark-1.3-contributor")
+        self.assertEqual(act["Account"], "account-2")
+        self.assertEqual(act["RouteKey"], route_key)
+        self.assertTrue(act["Optimal"])
+        self.assertEqual(act["Message"], decision["reason_code"])
+        self.assertEqual(self.payload("guardian-state.json")["LastStatus"],
+                         "OK-FREE-OPTIMAL")
+
+    def test_blocked_decision_surfaces_no_route_and_the_reason(self) -> None:
+        from cmo.policy import CANONICAL_ROUTES  # noqa: E402
+        blocked_db = self.tmp / "blocked.sqlite3"
+        store = EventStore(blocked_db)
+        try:
+            # Exhaust every canonical leg so the engine stops BLOCKED.
+            for route in CANONICAL_ROUTES:
+                for account in route["accounts"]:
+                    store.ingest(self.probe_failed(
+                        account, route["model"], provider=route["provider"],
+                        tier=route["tier"], reset_after_ms=900_000, reset_known=1))
+            out = self.tmp / "blocked-exports"
+            out.mkdir()
+            snapshot = build_snapshot(store)
+            self.assertEqual(snapshot["decision"]["action"], "BLOCKED")
+            self.assertIsNone(snapshot["decision"]["route"])
+            write_compatibility_exports(store, out)
+            status = json.loads((out / "model-routing.json").read_text(
+                encoding="utf-8"))["status"]
+            self.assertEqual(status["decision"], "BLOCKED")
+            self.assertIsNone(status["selectedRouteKey"])
+            self.assertEqual(status["reasonCode"],
+                             snapshot["decision"]["reason_code"])
+            guardian = json.loads((out / "guardian-status.json").read_text(
+                encoding="utf-8"))
+            self.assertEqual(guardian["Status"], "NO-ROUTE")
+            self.assertEqual(guardian["Act"]["Tier"], "NONE")
+            self.assertIsNone(guardian["Act"]["RouteKey"])
+            self.assertEqual(guardian["Act"]["Message"],
+                             snapshot["decision"]["reason_code"])
+        finally:
+            store.close()
 
 
 class MigrationTests(StoreCase):

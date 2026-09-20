@@ -105,9 +105,33 @@ if (-not (Test-Path -LiteralPath $BackupFull)) { throw "backup dir missing: $Bac
 
 if ($mode -eq 'live') {
   try { Unregister-ScheduledTask -TaskName 'ClineModelOptimizer-Service' -Confirm:$false -ErrorAction Stop } catch { }
-  try { Enable-ScheduledTask -TaskName 'CmoGuardian*' -ErrorAction Stop | Out-Null } catch { }
+  foreach ($guardianPattern in @('ClineModelOptimizer-Guardian', 'CmoGuardian*')) {
+    try { Enable-ScheduledTask -TaskName $guardianPattern -ErrorAction Stop | Out-Null } catch { }
+  }
+  # Dashboard shortcut: restore the pre-existing file when the install
+  # overwrote one, otherwise remove exactly the file the install created.
+  $shortcutAction = 'none'
+  $shortcutPath = $receipt.dashboardShortcut
+  if ($shortcutPath) {
+    $backupRel = $receipt.dashboardShortcutBackup
+    if ($receipt.dashboardShortcutPreexisting -and $backupRel) {
+      $backupFile = Join-Path $BackupFull $backupRel
+      if (Test-Path -LiteralPath $backupFile) {
+        Copy-Item -LiteralPath $backupFile -Destination $shortcutPath -Force
+        $shortcutAction = 'restored-preexisting'
+      }
+    } elseif ($receipt.dashboardShortcutWritten) {
+      if (Test-Path -LiteralPath $shortcutPath) {
+        Remove-Item -LiteralPath $shortcutPath -Force
+        $shortcutAction = 'removed-created'
+      } else {
+        $shortcutAction = 'already-absent'
+      }
+    }
+  }
   Write-Host 'live: v2 task unregistered; legacy guardian re-enabled'
 } else {
+  $shortcutAction = 'drill-skipped'
   Write-Host 'drill mode: no host tasks/services touched'
 }
 
@@ -149,6 +173,7 @@ Write-Host ("rollback: {0} staged file(s) removed, {1} backed-up file(s) restore
 
 $rollback = @{
   backupDir            = $BackupFull
+  dashboardShortcut    = @{ action = $shortcutAction; path = $receipt.dashboardShortcut }
   installRoot          = $InstallFull
   mode                 = $mode
   removed              = @($removed | Sort-Object)

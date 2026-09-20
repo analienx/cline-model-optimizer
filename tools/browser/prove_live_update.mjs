@@ -211,6 +211,26 @@ async function main() {
       failures.push("rendered free matrix does not show a verified leg");
     }
 
+    // Prove the decision panel renders the leg the engine actually chose
+    // (regression: it used to read phantom decision.selected/blocked_reason
+    // keys and always showed "no eligible route").
+    const decisionPanel = await cdp.eval(`(() => {
+      const box = document.getElementById('decision');
+      const s = window.__cmoSnapshot;
+      return { text: box ? box.innerText.replace(/\\s+/g, ' ').slice(0, 600) : null,
+               action: s && s.decision ? s.decision.action : null,
+               route: s && s.decision && s.decision.route ? s.decision.route.route_key : null };
+    })()`);
+    log("decision-panel", decisionPanel);
+    if (decisionPanel && decisionPanel.route) {
+      if (!decisionPanel.text || !decisionPanel.text.includes(decisionPanel.route)) {
+        failures.push(`rendered decision panel does not show the ${decisionPanel.action} route ${decisionPanel.route}`);
+      }
+    } else if (decisionPanel && decisionPanel.action === "BLOCKED" &&
+               (!decisionPanel.text || !/no eligible route/i.test(decisionPanel.text))) {
+      failures.push("rendered decision panel on BLOCKED does not explain the block");
+    }
+
     const shot = await cdp.send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true });
     const shotPath = path.join(OUT, "dashboard-live.png");
     fs.writeFileSync(shotPath, Buffer.from(shot.data, "base64"));
@@ -228,6 +248,7 @@ async function main() {
       sse_requests: sseRequests,
       console_errors: consoleErrors,
       rendered_matrix_excerpt: rendered,
+      decision_panel: decisionPanel,
       screenshot: shotPath,
       failures,
     };

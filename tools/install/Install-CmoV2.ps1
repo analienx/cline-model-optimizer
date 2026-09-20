@@ -155,18 +155,24 @@ if ($mode -eq 'drill') {
 # First mutation happens only after the digest check above: create backup dir.
 New-Item -ItemType Directory -Path $BackupFull -Force | Out-Null
 
+# Deterministic dashboard shortcut target (created only in live mode).
+$dashboardShortcutPath = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Cline Model Optimizer Dashboard.url'
+$dashboardUrl = "http://127.0.0.1:$ServicePort/"
+
 # ---------------------------------------------------------------------------
 # deterministic plan (sorted keys) + plan hash, written first
 # ---------------------------------------------------------------------------
 
 $actions = @('verify-artifact', 'write-plan', 'backup-existing', 'stage-artifact', 'exports-write', 'verify-manifest')
-if ($mode -eq 'live') { $actions += 'live-host-tasks' } else { $actions += 'skip-host-mutation' }
+if ($mode -eq 'live') { $actions += 'live-host-tasks', 'live-dashboard-shortcut' } else { $actions += 'skip-host-mutation' }
 
 $plan = @{
-  actions        = $actions
-  artifactDigest = $artifactDigest
-  artifactPath   = $ArtifactFull
-  backupDir      = $BackupFull
+  actions           = $actions
+  artifactDigest    = $artifactDigest
+  artifactPath      = $ArtifactFull
+  backupDir         = $BackupFull
+  dashboardShortcut = $dashboardShortcutPath
+  dashboardUrl      = $dashboardUrl
   expectedDigest = $ExpectedDigest.ToLowerInvariant()
   files          = $STAGED_FILES
   generatedAt    = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -219,12 +225,24 @@ Write-DeterministicJson (Join-Path $BackupFull 'scheduled-tasks.json') @{ tasks 
 
 $shortcutMeta = @()
 foreach ($candidate in @(
+    $dashboardShortcutPath,
     (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Cline Model Optimizer.lnk'),
     (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Cline Model Optimizer.lnk'),
     (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Cline Model Optimizer.lnk'))) {
   $shortcutMeta += @{ path = $candidate; exists = (Test-Path -LiteralPath $candidate) }
 }
 Write-DeterministicJson (Join-Path $BackupFull 'shortcuts.json') @{ shortcuts = $shortcutMeta }
+
+# Preserve a pre-existing dashboard shortcut (read-only to the host; the copy
+# lands inside BackupDir). Done in both modes so rollback can restore it.
+$shortcutPreexisting = Test-Path -LiteralPath $dashboardShortcutPath
+$shortcutBackupRel = $null
+if ($shortcutPreexisting) {
+  $shortcutBackupRel = 'shortcut-backup/Cline Model Optimizer Dashboard.url'
+  New-Item -ItemType Directory -Path (Join-Path $BackupFull 'shortcut-backup') -Force | Out-Null
+  Copy-Item -LiteralPath $dashboardShortcutPath `
+    -Destination (Join-Path $BackupFull $shortcutBackupRel) -Force
+}
 Write-Host ("backup: {0} existing file(s) preserved, {1} new staged file(s)" -f $backedUp.Count, $created.Count)
 
 # ---------------------------------------------------------------------------
@@ -268,9 +286,20 @@ if ($mode -eq 'live') {
   $action = New-ScheduledTaskAction -Execute 'python' -Argument "`"$serveTarget`" serve --port $ServicePort --artifact-digest $artifactDigest"
   $trigger = New-ScheduledTaskTrigger -AtLogOn
   Register-ScheduledTask -TaskName 'ClineModelOptimizer-Service' -Action $action -Trigger $trigger -Force | Out-Null
-  try { Disable-ScheduledTask -TaskName 'CmoGuardian*' -ErrorAction Stop | Out-Null } catch { }
-  Write-Host 'live host tasks registered; legacy guardian writer retired'
+  # Retire the legacy guardian writer. The observed legacy task name is
+  # ClineModelOptimizer-Guardian; CmoGuardian* covers the v2-era variant.
+  foreach ($guardianPattern in @('ClineModelOptimizer-Guardian', 'CmoGuardian*')) {
+    try { Disable-ScheduledTask -TaskName $guardianPattern -ErrorAction Stop | Out-Null } catch { }
+  }
+  # Start Menu dashboard shortcut: a plain .url internet shortcut so the bytes
+  # are deterministic and human-auditable.
+  $shortcutText = "[InternetShortcut]`r`nURL=$dashboardUrl`r`n"
+  [System.IO.File]::WriteAllText($dashboardShortcutPath, $shortcutText,
+    [System.Text.ASCIIEncoding]::new())
+  $shortcutWritten = $true
+  Write-Host 'live host tasks registered; legacy guardian writer retired; dashboard shortcut written'
 } else {
+  $shortcutWritten = $false
   Write-Host 'drill mode: no tasks/services/shortcuts registered; real tree untouched'
 }
 
@@ -279,8 +308,12 @@ if ($mode -eq 'live') {
 # ---------------------------------------------------------------------------
 
 $receipt = @{
-  artifactDigest = $artifactDigest
-  backupDir      = $BackupFull
+  artifactDigest               = $artifactDigest
+  backupDir                    = $BackupFull
+  dashboardShortcut            = $dashboardShortcutPath
+  dashboardShortcutBackup      = $shortcutBackupRel
+  dashboardShortcutPreexisting = $shortcutPreexisting
+  dashboardShortcutWritten     = $shortcutWritten
   files          = $STAGED_FILES
   installRoot    = $InstallFull
   mode           = $mode

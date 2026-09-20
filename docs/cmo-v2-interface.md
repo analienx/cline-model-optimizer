@@ -65,11 +65,11 @@ Returns `cmo.snapshot/v2`. The fields Pi needs:
     "action": "LAUNCH | PROBE | BLOCKED",
     "strategy": "free-first",
     "free_only": false,
-    "selected": {"route_key": "account-1|cline|cline-free/deepseek-v4.1-flash|free",
-                 "account_alias": "account-1", "provider": "cline",
-                 "model": "cline-free/deepseek-v4.1-flash", "tier": "free",
-                 "reason_code": "probe.ok"},
-    "blocked_reason": null,
+    "route": {"route_key": "account-1|cline|cline-free/deepseek-v4.1-flash|free",
+              "account_alias": "account-1", "provider": "cline",
+              "model": "cline-free/deepseek-v4.1-flash", "tier": "free"},
+    "reason": "probe evidence verified for account-1 free leg",
+    "reason_code": "probe.ok",
     "skipped": [{"route_key": "...", "reason_code": "quota.confirmed", "detail": "..."}]
   },
   "cells": [{"route_key": "...", "state": "AVAILABLE|QUOTA|AUTH_BLOCKED|TRANSIENT|PROBING|UNKNOWN|STALE|CAPABILITY_UNAVAILABLE|FORCE_SKIP",
@@ -81,10 +81,11 @@ Returns `cmo.snapshot/v2`. The fields Pi needs:
 
 Semantics:
 
-* `LAUNCH` — the selected leg has valid evidence and must be used.
+* `LAUNCH` — the `route` leg has valid evidence and must be used.
 * `PROBE` — no leg has valid evidence; run one bounded provider probe on
-  `selected` and report the result. Never sweep all nine legs.
-* `BLOCKED` — nothing is authorized right now; report and wait.
+  `route` and report the result. Never sweep all nine legs.
+* `BLOCKED` — nothing is authorized right now (`route` is null and `reason` /
+  `reason_code` explains why); report and wait.
 
 Route identity is `account_alias|provider|normalized_model|tier`. Pi must use
 the exact `route_key` when reporting evidence.

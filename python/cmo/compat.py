@@ -213,11 +213,13 @@ def _model_routing(snapshot: dict[str, Any], revision: int, now: int,
 
 def _status_block(snapshot: dict[str, Any]) -> dict[str, Any]:
     decision = snapshot["decision"]
+    # The chosen leg lives under "route" (None when BLOCKED); there is no
+    # "selected" key. reason_code/reason live at decision top level.
+    route = decision.get("route") or {}
     return {
         "decision": decision["action"],
-        "selectedRouteKey": (decision.get("selected") or {}).get("route_key"),
-        "reasonCode": (decision.get("selected") or {}).get("reason_code")
-        or decision.get("blocked_reason"),
+        "selectedRouteKey": route.get("route_key"),
+        "reasonCode": decision.get("reason_code") or decision.get("reason"),
         "stateRevision": snapshot["state_revision"],
         "catalogStatus": snapshot["freshness"]["catalog_status"],
         "serviceStatus": snapshot["service"]["status"],
@@ -227,7 +229,11 @@ def _status_block(snapshot: dict[str, Any]) -> dict[str, Any]:
 def _guardian_status(snapshot: dict[str, Any], revision: int, now: int,
                      digest: str) -> dict[str, Any]:
     decision = snapshot["decision"]
-    selected = decision.get("selected") or {}
+    # The chosen leg lives under "route" (None when BLOCKED); there is no
+    # "selected" key. reason_code/reason live at decision top level.
+    selected = decision.get("route") or {}
+    message = (decision.get("reason_code") or decision.get("reason")
+               or "route decision recorded")
     tier = selected.get("tier", "NONE")
     if decision["action"] == "LAUNCH" and tier:
         status = "SUB-IN-USE" if tier == "subscription" else "OK-FREE-OPTIMAL"
@@ -240,12 +246,10 @@ def _guardian_status(snapshot: dict[str, Any], revision: int, now: int,
         "Model": selected.get("model"),
         "Tier": tier.upper(),
         "Optimal": decision["action"] == "LAUNCH" and tier == "free",
-        "Message": (selected.get("reason_code") or decision.get("blocked_reason")
-                    or "route decision recorded"),
+        "Message": message,
         "Recommendation": {
             "Optimal": decision["action"] == "LAUNCH" and tier == "free",
-            "Message": (selected.get("reason_code") or decision.get("blocked_reason")
-                        or "route decision recorded"),
+            "Message": message,
         },
         "Account": selected.get("account_alias"),
         "RouteKey": selected.get("route_key"),

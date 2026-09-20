@@ -300,11 +300,13 @@ function renderDecision(snap) {
   const box = $("decision");
   clear(box);
   const d = snap.decision;
-  const selected = d.selected || {};
+  // The chosen leg lives under decision.route (None when BLOCKED);
+  // reason_code/reason live at decision top level.
+  const selected = d.route || {};
   box.append(el("div", { class: `action action-${d.action}`, text: d.action || "UNKNOWN" }));
-  box.append(el("div", { class: "route-chip", text: selected.route_key || d.blocked_reason || "no eligible route" }));
-  if (selected.reason_code) box.append(el("div", { class: "meta", text: `reason ${selected.reason_code}` }));
-  if (d.blocked_reason && d.action !== "LAUNCH") box.append(el("div", { class: "meta", text: d.blocked_reason }));
+  box.append(el("div", { class: "route-chip", text: selected.route_key || (d.action === "BLOCKED" ? (d.reason || d.reason_code) : null) || "no eligible route" }));
+  if (d.reason_code) box.append(el("div", { class: "meta", text: `reason ${d.reason_code}` }));
+  if (d.reason && d.action !== "LAUNCH") box.append(el("div", { class: "meta", text: d.reason }));
   box.append(el("div", { class: "meta", text: `strategy ${d.strategy || S.strategy}${d.free_only ? " · free_only" : ""} · goal ${snap.selected_goal_id || "none"}` }));
   if (selected.account_alias) box.append(el("div", { class: "meta", text: `account ${selected.account_alias}` }));
 
