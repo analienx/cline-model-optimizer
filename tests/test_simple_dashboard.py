@@ -1,6 +1,9 @@
 """Simple dashboard: bounded free-model preferences and account registry."""
 from __future__ import annotations
 import sys
+import os
+import json
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parent))
@@ -39,6 +42,35 @@ class SimpleDashboardTests(PolicyServerCase):
         account5=next(a for a in snap['policy']['accounts'] if a['id']=='account-5')
         assert account5['label']=='contact5@example.test'
         assert account5['status']=='tracked'
+    def test_advanced_uses_the_same_shell_not_legacy_dashboard(self):
+        from urllib.request import urlopen
+        with urlopen(f"http://127.0.0.1:{self.port}/advanced", timeout=5) as res:
+            html = res.read().decode("utf-8")
+        assert 'stylesheet" href="/simple.css"' in html
+        assert 'script src="/advanced.js"' in html
+        assert 'script src="/app.js"' not in html
+        for path in ("/advanced.js", "/api/simple/accounts/readiness"):
+            assert self.call("GET", path)[0] == 200
+
+    def test_profile_readiness_never_returns_credentials_or_infers_live_auth(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            agent = root / "account-1" / "agent"
+            agent.mkdir(parents=True)
+            (agent / "auth.json").write_text(json.dumps({
+                "cline": {"access": "secret-free-token", "refresh": "secret-refresh"},
+                "cline-pass": {"access": "secret-pass-token"}}), encoding="utf-8")
+            with patch.dict(os.environ, {"PI_PROFILE_ROOT": temp}):
+                status, result = self.call("GET", "/api/simple/accounts/readiness")
+        assert status == 200 and result["schema"] == "cmo.account-readiness/v1"
+        account = next(a for a in result["accounts"] if a["id"] == "account-1")
+        assert account["profile_exists"] and account["cline_saved"] and account["pass_saved"]
+        assert account["live_auth_verified"] is False
+        assert account["pass_entitlement_verified"] is False
+        assert "secret" not in json.dumps(result)
+        missing = next(a for a in result["accounts"] if a["id"] == "account-2")
+        assert not missing["profile_exists"] and not missing["cline_saved"]
+
     def test_default_and_advanced_pages_exist(self):
         for path, marker in (('/',b'Free router status'),('/advanced',b'Cline Model Optimizer'),('/simple.js',b'function renderRouter')):
             status, _ = self.call('GET',path)
