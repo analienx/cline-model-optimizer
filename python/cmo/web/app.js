@@ -602,8 +602,8 @@ function renderEvents(snap) {
     el("thead", {}, [el("tr", {}, head.map((h) => el("th", { scope: "col", text: h })))]),
     el("tbody", {}, rows.map((e) => el("tr", {}, [
       el("td", { "data-label": "#", text: e.seq }),
-      el("td", { "data-label": "occurred", text: e.occurred_at_iso || e.occurred_at }),
-      el("td", { "data-label": "received", text: e.received_at_iso || e.received_at }),
+      el("td", { "data-label": "occurred", text: e.occurred_iso || e.occurred_at }),
+      el("td", { "data-label": "received", text: e.received_iso || e.received_at }),
       el("td", { "data-label": "type" }, [el("code", { text: e.event_type })]),
       el("td", { "data-label": "source", text: e.source_component || "—" }),
       el("td", { "data-label": "route", text: [e.account_alias, e.provider, e.model, e.tier].filter(Boolean).join(" / ") || "—" }),
