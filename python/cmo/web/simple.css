@@ -19,3 +19,16 @@ button:hover:not(:disabled),details summary:hover{filter:brightness(.92)}button:
 @media(max-width:760px){.advanced-intro{padding:5px 0 22px}.advanced-account-grid{grid-template-columns:1fr}.advanced-goal{align-items:start;flex-direction:column}.route-item.model-ready,.route-item.model-partial,.route-item.model-exhausted,.route-item.model-recheck{padding-left:13px}.pass-line{align-items:flex-start;flex-direction:column}}
 
 @media(max-width:760px){.right .minor{display:inline-block;font-size:11px}.header .right{gap:7px}.header .ghost{padding:7px 3px}.brand small{font-size:11px}}
+
+/* Account setup is an immediate, readable action; commands stay secondary. */
+.account-connect{display:flex;align-items:flex-start;flex-wrap:wrap;gap:8px 12px;margin-top:10px;padding:11px 12px;border:1px solid #dbe8d9;background:#f4f8f1;border-radius:12px;max-width:690px}
+.account-connect .connect-label{flex:1 1 180px;align-self:center;font-size:12px;font-weight:800;color:#315d46}
+.account-connect-button{flex:0 0 auto;min-height:39px;white-space:normal;text-align:center}
+.account-copy-feedback{flex:1 1 100%;margin:0;color:#285744;font-size:12px;line-height:1.5}
+.account-connect .account-guide{flex:1 1 100%;margin:0;padding:0;border:0;background:transparent;max-width:none}
+.account-connect .account-guide>summary{display:inline-block;border:0;padding:3px 0;color:#567766;text-decoration:underline;text-underline-offset:3px;font-size:11px}
+.account-connect .account-guide[open]>summary{display:list-item;margin:3px 0 7px}
+.account-connect .account-guide-body{padding:0 0 4px}
+.account-connect .account-command{user-select:text;-webkit-user-select:text;overflow-wrap:anywhere}
+.account-connect .account-setup-hint{color:#617169}
+@media(max-width:760px){.account-connect{padding:10px}.account-connect-button{width:100%}.account-connect .connect-label{flex-basis:100%}}

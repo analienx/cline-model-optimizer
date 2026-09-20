@@ -1,6 +1,6 @@
 "use strict";
 const $ = id => document.getElementById(id);
-const state = {snap:null, catalog:[], selected:[], saved:[], dirty:false, loading:false, connected:false, readiness:{}};
+const state = {snap:null, catalog:[], selected:[], saved:[], dirty:false, loading:false, connected:false, readiness:{},setupHelp:null};
 const el = (tag,cls,text) => {const x=document.createElement(tag);if(cls)x.className=cls;if(text!==undefined)x.textContent=String(text);return x;};
 const clear = n => {n.replaceChildren();return n;};
 const api = async (url, opts={}) => {const response=await fetch(url,{cache:'no-store',...opts});const data=await response.json();if(!response.ok)throw Error(data.error||`HTTP ${response.status}`);return data;};
@@ -102,6 +102,20 @@ async function saveModels(){if(state.selected.length<1||state.selected.length>4)
 $('save-models').disabled=true;try{await send('/api/simple/models',{models:state.selected,expected_digest:state.snap.policy.digest});state.saved=[...state.selected];state.dirty=false;tell('Model priorities saved. Existing Pi attempts are not interrupted.');await load(true);}catch(e){tell('Could not save: '+e.message,true);renderModels();}}
 async function loadCatalog(){try{const result=await api('/api/simple/catalog');state.catalog=[...new Set([...result.selected,...result.free])];$('catalog-note').textContent=result.ok?'Only verified free models can be added. Availability is checked separately.':result.message;}
 catch(e){state.catalog=[...state.saved];$('catalog-note').textContent='Catalog not reachable. Existing choices are preserved.';}renderModels();}
+function accountSetupCommand(id,stage){
+ if(!/^account-[1-5]$/.test(id))throw Error('Invalid account slot');
+ const helper=stage==='provision'?'Provision-PiClineAccount.ps1':'Initialize-PiClineAccount.ps1';
+ return 'powershell -NoProfile -File "' + String.raw`C:\Workspace\repos\config\tools\pi` + '\\' + helper + '" -Account ' + id;
+}
+async function copySetupCommand(id,stage,button,guide,feedback){
+ const command=accountSetupCommand(id,stage);let copied=false;
+ try{if(navigator.clipboard?.writeText){await navigator.clipboard.writeText(command);copied=true;}}catch{}
+ if(!copied){const input=el('textarea');input.value=command;input.setAttribute('aria-hidden','true');input.style.cssText='position:fixed;top:0;left:-9999px';document.body.append(input);input.select();try{copied=document.execCommand('copy')===true;}catch{}input.remove();}
+ guide.open=true;state.setupHelp={id,stage,copied};
+ if(copied){button.textContent='Copied!';guide.querySelector('summary').textContent='What was copied?';feedback.textContent='Copied to this device. On your Windows computer, open PowerShell, paste and press Enter. '+(stage==='provision'?'Then select Refresh setup below.':'Finish the browser sign-in with this account, then select Refresh setup below.');}
+ else{button.textContent='Copy command';feedback.textContent='Clipboard access was blocked. Select and copy the command below manually.';}
+ feedback.hidden=false;
+}
 function renderAccounts(snap){const box=clear($('accounts'));
  const accounts=[...(snap.policy.accounts||[])].sort((a,b)=>(a.priority??0)-(b.priority??0));
  $('account-count').textContent=`${accounts.length} / 5`;const add=accounts.length<5;
@@ -118,14 +132,21 @@ function renderAccounts(snap){const box=clear($('accounts'));
  pass.append(el('span','',passMessage));
  if(ready?.pass_saved){const link=el('a','pass-link','View 5h / weekly / monthly usage');link.href='https://app.cline.bot/dashboard';link.target='_blank';link.rel='noopener noreferrer';link.title='Open Cline dashboard; select this same account to view its live limits';pass.append(link);}
  main.append(pass);
- if(ready&&!ready.cline_saved){const guide=el('details','account-guide'),sum=el('summary','','How to connect this account');const body=el('div','account-guide-body');
- if(!ready.profile_exists){body.append(el('p','',`1. Create the isolated Pi profile for ${account.id} using this scoped command. It will not copy credentials or affect existing profiles:`));
- const provision=el('code','',String.raw`powershell -NoProfile -File "C:\Workspace\repos\config\tools\pi\Provision-PiClineAccount.ps1" -Account ${account.id}`);body.append(provision);
- }else{body.append(el('p','',`Your isolated Pi profile ${account.id} exists. Next, sign in to THIS Pi profile using the helper below.`));}
- const cmd=el('code','',String.raw`powershell -NoProfile -File "C:\Workspace\repos\config\tools\pi\Initialize-PiClineAccount.ps1" -Account ${account.id}`);
- body.append(el('p','','Run the Pi sign-in helper in PowerShell. Complete browser sign-in with this exact account:'),cmd,
-   el('p','','Then select Check profile. It confirms local files only. Live identity, matching email, subscription and quota still require separate verification.'));
- guide.append(sum,body);main.append(guide);}
+ if(ready&&!ready.cline_saved){
+  const stage=ready.profile_exists?'signin':'provision';
+  const connect=el('div','account-connect'),label=el('div','connect-label',stage==='signin'?'Next step: sign in to Pi':'Next step: create your Pi profile');
+  const guide=el('details','account-guide'),sum=el('summary','','Show command & instructions'),body=el('div','account-guide-body');
+  const feedback=el('p','account-copy-feedback');feedback.setAttribute('role','status');feedback.setAttribute('aria-live','polite');feedback.hidden=true;
+  const command=el('code','account-command',accountSetupCommand(account.id,stage));command.tabIndex=0;
+  body.append(el('p','',stage==='signin'?'On your Windows computer, run the copied command in PowerShell and complete the browser sign-in using this account.':'On your Windows computer, run the copied command in PowerShell. This creates only the isolated profile for this account.'),command);
+  body.append(makeButton('Refresh setup',()=>load(true)));
+  body.append(el('p','account-setup-hint',stage==='signin'?'A saved sign-in does not prove the email identity or free-model quota. Check availability separately.':'Once the profile is created, Refresh setup will show the separate sign-in step.'));
+  guide.append(sum,body);
+  const button=makeButton(stage==='signin'?'Copy sign-in command':'Copy setup command',()=>copySetupCommand(account.id,stage,button,guide,feedback));
+  button.classList.add('primary','account-connect-button');button.setAttribute('aria-label',`${button.textContent} for ${account.id}`);
+  if(state.setupHelp?.id===account.id&&state.setupHelp.stage===stage){guide.open=true;if(state.setupHelp.copied){button.textContent='Copied!';sum.textContent='What was copied?';feedback.textContent='Copied to this device. On your Windows computer, open PowerShell, paste and press Enter. '+(stage==='provision'?'Then select Refresh setup below.':'Finish the browser sign-in, then select Refresh setup below.');}else feedback.textContent='Clipboard access was blocked. Select and copy the command below manually.';feedback.hidden=false;}
+  connect.append(label,button,feedback,guide);main.append(connect);
+ }
  const manage=el('details','account-actions'),summary=el('summary','','Manage'),menu=el('div','account-menu');summary.setAttribute('aria-label','Manage '+account.id);
  menu.append(makeButton('↑ Priority',()=>moveAccount(accounts,index,-1),index===0),makeButton('↓ Priority',()=>moveAccount(accounts,index,1),index===accounts.length-1));
  menu.append(makeButton('Set email',()=>editEmail(account,main)),makeButton('Check profile',()=>verifyAccount(account.id)));
@@ -143,7 +164,7 @@ try{const doc=JSON.parse(JSON.stringify(state.snap.policy));const mine=doc.accou
 await send('/api/policy',{doc,expected_digest:state.snap.policy.digest,note:'simple dashboard account priority'});tell('Account priority saved for later route decisions.');await load(true);}catch(e){tell('Account priority could not be saved: '+e.message,true);}}
 async function addAccount(event){event.preventDefault();const email=$('new-email').value.trim();const accounts=state.snap.policy.accounts||[];if(accounts.length>=5)return tell('Maximum five accounts.',true);
 const used=new Set(accounts.map(a=>a.id));let id='';for(let i=1;i<=5;i++){if(!used.has(`account-${i}`)){id=`account-${i}`;break;}}if(!id)return tell('No account slot available.',true);
-try{await mutateAccount({op:'add',id,label:email,profile:id,enabled:false,attach_routes:state.saved,note:'simple dashboard add tracked account'});$('new-email').value='';tell(`${id} added as a disabled slot. Open its How to connect guide, create its separate Pi profile, sign in there, then check it before enabling.`);}catch(e){tell('Account could not be added: '+e.message,true);}}
+try{await mutateAccount({op:'add',id,label:email,profile:id,enabled:false,attach_routes:state.saved,note:'simple dashboard add tracked account'});$('new-email').value='';tell(`${id} added as a disabled slot. Use Copy setup command on the new account card. After creating its profile, select Refresh setup to get the sign-in step.`);}catch(e){tell('Account could not be added: '+e.message,true);}}
 async function load(preserve=false){if(state.loading)return;state.loading=true;try{const [snap,readiness]=await Promise.all([api('/api/snapshot'),api('/api/simple/accounts/readiness')]);state.snap=snap;state.readiness=Object.fromEntries((readiness.accounts||[]).map(a=>[a.id,a]));state.connected=true;const status=$('connection');status.textContent='Connected';status.className='status good';renderRouter(snap);renderWork(snap);renderAccounts(snap);
 const saved=(snap.policy.routes||[]).filter(r=>r.tier==='free'&&r.enabled!==false).slice(0,4).map(r=>r.model);if(!state.dirty||!preserve){state.selected=[...saved];state.saved=[...saved];state.dirty=false;}else{state.saved=[...saved];state.dirty=JSON.stringify(state.selected)!==JSON.stringify(saved);}state.catalog=[...new Set([...state.catalog,...saved])];renderModels();}
 catch(e){state.connected=false;const status=$('connection');status.textContent='Disconnected';status.className='status bad';tell('Connection lost. Saved information may be stale. Changes are disabled until the service responds.',true);$('save-models').disabled=true;}finally{state.loading=false;}}
