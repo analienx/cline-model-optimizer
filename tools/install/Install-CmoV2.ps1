@@ -294,8 +294,7 @@ if ($mode -eq 'live') {
     # Non-elevated install: fall back to the user-writable per-user Startup
     # folder, which autostarts the same service at logon without admin rights.
     $startupCmd = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\ClineModelOptimizer-Service.cmd'
-    $cmdText = "@echo off`r`nstart `"`" /b `"`"%LOCALAPPDATA%\ClineModelOptimizer\v2\cmo.pyz`"`" serve --port $ServicePort`r\n"
-    $cmdText = "@echo off`r`nstart `"`" /b python `"$serveTarget`" serve --port $ServicePort --artifact-digest $artifactDigest`r\n"
+    $cmdText = "@echo off`r`nstart `"`" /b python `"$serveTarget`" serve --port $ServicePort --artifact-digest $artifactDigest`r`n"
     [System.IO.File]::WriteAllText($startupServicePath, $cmdText, [System.Text.ASCIIEncoding]::new())
     $autostart = 'startup-folder'
   }
