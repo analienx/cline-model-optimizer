@@ -14,7 +14,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from .events import EventStore, iso_to_ms, now_ms
+from .events import (FIXTURE_GOAL_IDS, FIXTURE_SOURCES, TRUNCATED_IDENTITIES,
+                     EventStore, iso_to_ms, now_ms, rebuild)
 from .policy import PROVIDER_CLINE, TIER_FREE
 
 DEFAULT_SOURCES = (
@@ -77,6 +78,66 @@ def migrate(store: EventStore, *, source: list[str] | None = None,
             report["ok"] = False
     report["state_revision"] = store.revision()
     return report
+
+
+def quarantine_fixtures(store: EventStore, *, dry_run: bool = False) -> dict[str, Any]:
+    """Delete synthetic/fixture events from a live store and rebuild projections.
+
+    Removes rows produced by browser-acceptance/synthetic harnesses
+    (fixture ``source_component``, fixture goal ids, truncated single-character
+    route identities on route-like events) and then replays the remaining
+    history via :func:`events.rebuild` so no projection row is left behind that
+    was shaped only by quarantined evidence. Records a receipt under the
+    ``quarantine-fixtures-v1`` fingerprint; repeated calls are a no-op
+    returning zero removals. With ``dry_run=True`` nothing is deleted or
+    rebuilt; the report carries ``dry_run: True`` with the would-be removals.
+    """
+    fixture_list = sorted(FIXTURE_SOURCES)
+    placeholders = ",".join("?" for _ in fixture_list)
+    goal_list = sorted(FIXTURE_GOAL_IDS)
+    goal_placeholders = ",".join("?" for _ in goal_list)
+    truncated = sorted(TRUNCATED_IDENTITIES)
+    trunc_placeholders = ",".join("?" for _ in truncated)
+    conn = store._conn
+    before = conn.execute("SELECT COUNT(*) AS n FROM events").fetchone()["n"]
+    sql = (
+        "SELECT event_id FROM events WHERE source_component IN "
+        f"({placeholders}) OR goal_id IN ({goal_placeholders}) OR "
+        "(event_type LIKE 'route.%' OR event_type LIKE 'attempt.%') AND "
+        f"(account_alias IN ({trunc_placeholders}) OR model IN ({trunc_placeholders}))"
+    )
+    args = fixture_list + goal_list + truncated + truncated
+    doomed = [row["event_id"] for row in conn.execute(sql, args).fetchall()]
+    removed = 0
+    if dry_run:
+        return {"ok": True, "dry_run": True, "events_before": before,
+                "events_removed": 0, "would_remove": len(doomed),
+                "doomed": doomed[:50]}
+    if doomed:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for index in range(0, len(doomed), 500):
+                chunk = doomed[index:index + 500]
+                marks = ",".join("?" for _ in chunk)
+                cursor = conn.execute(
+                    f"DELETE FROM events WHERE event_id IN ({marks})", chunk)
+                removed += cursor.rowcount if cursor.rowcount > 0 else 0
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+    replay = rebuild(conn)
+    receipt = {
+        "fingerprint": "quarantine-fixtures-v1",
+        "events_before": before,
+        "events_removed": removed,
+        "replayed": replay.get("replayed"),
+        "revision": replay.get("revision"),
+    }
+    _record_receipt(store, "quarantine-fixtures-v1", Path("<live-store>"), removed,
+                    [f"removed={removed} before={before}"], now_ms())
+    receipt["ok"] = True
+    return receipt
 
 
 def _already_imported(store: EventStore, fingerprint: str) -> bool:

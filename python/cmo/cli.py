@@ -307,6 +307,17 @@ def cmd_migrate(args: argparse.Namespace) -> int:
     return 0 if report["ok"] else 1
 
 
+def cmd_quarantine(args: argparse.Namespace) -> int:
+    from .migration import quarantine_fixtures
+    with _open_store(args) as store:
+        if args.dry_run:
+            report = quarantine_fixtures(store, dry_run=True)
+        else:
+            report = quarantine_fixtures(store)
+        emit(envelope(store, {"ok": report["ok"], "report": report}))
+    return 0 if report["ok"] else 1
+
+
 def cmd_context_escalate(args: argparse.Namespace) -> int:
     with _open_store(args) as store:
         goal = next((g for g in store.goals() if g["goal_id"] == args.goal_id), None)
@@ -457,6 +468,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="legacy source file/dir (repeatable)")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(func=cmd_migrate)
+
+    p = sub.add_parser("quarantine")
+    add_store_args(p)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_quarantine)
 
     p = sub.add_parser("context-escalate")
     add_store_args(p)

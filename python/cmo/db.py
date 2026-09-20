@@ -156,9 +156,28 @@ CREATE TABLE IF NOT EXISTS recheck_requests (
     requested_at INTEGER,
     requested_by TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
-    reason TEXT
+    reason TEXT,
+    started_at INTEGER,
+    finished_at INTEGER,
+    lease_owner TEXT,
+    attempt INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
 );
 """
+
+_RECHECK_COLUMNS = ("started_at", "finished_at", "lease_owner", "attempt",
+                    "last_error")
+
+
+def _ensure_recheck_columns(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in
+                conn.execute("PRAGMA table_info(recheck_requests)").fetchall()}
+    for column in _RECHECK_COLUMNS:
+        if column not in existing:
+            definition = "INTEGER" if column in ("started_at", "finished_at") \
+                else "INTEGER NOT NULL DEFAULT 0" if column == "attempt" \
+                else "TEXT"
+            conn.execute(f"ALTER TABLE recheck_requests ADD COLUMN {column} {definition}")
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
@@ -177,6 +196,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
+    _ensure_recheck_columns(conn)
     row = conn.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
     if row is None:
         conn.execute("INSERT INTO metadata(key, value) VALUES('schema_version', ?)",
