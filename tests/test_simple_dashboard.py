@@ -71,6 +71,15 @@ class SimpleDashboardTests(PolicyServerCase):
         missing = next(a for a in result["accounts"] if a["id"] == "account-2")
         assert not missing["profile_exists"] and not missing["cline_saved"]
 
+    def test_advanced_copy_does_not_display_fallback_question_marks(self):
+        for page in ("advanced.html", "advanced.js", "simple.js"):
+            body = (Path(__file__).resolve().parents[1] / "python" / "cmo" / "web" / page).read_text(encoding="utf-8")
+            if page == "advanced.html":
+                assert " ? " not in body
+            assert " ? legacy" not in body
+            assert " ? recheck needed" not in body
+            assert "View 5h / week / month limits ?" not in body
+            assert " ? live login" not in body
     def test_default_and_advanced_pages_exist(self):
         for path, marker in (('/',b'Free router status'),('/advanced',b'Cline Model Optimizer'),('/simple.js',b'function renderRouter')):
             status, _ = self.call('GET',path)
