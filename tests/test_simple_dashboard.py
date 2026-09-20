@@ -84,3 +84,16 @@ class SimpleDashboardTests(PolicyServerCase):
         for path, marker in (('/',b'Free router status'),('/advanced',b'Cline Model Optimizer'),('/simple.js',b'function renderRouter')):
             status, _ = self.call('GET',path)
             assert status==200
+
+
+def test_account_onboarding_has_visible_clipboard_action_and_readable_fallback():
+    source=(Path(__file__).resolve().parents[1]/'python/cmo/web/simple.js').read_text(encoding='utf-8')
+    css=(Path(__file__).resolve().parents[1]/'python/cmo/web/simple.css').read_text(encoding='utf-8')
+    assert 'Copy sign-in command' in source and 'Copy setup command' in source
+    assert 'navigator.clipboard.writeText(command)' in source
+    assert "document.execCommand('copy')" in source
+    assert 'Clipboard access was blocked' in source
+    assert 'accountSetupCommand(account.id,stage)' in source
+    assert 'account-connect-button' in css
+    assert 'What was copied?' in source and 'Show command & instructions' in source and 'Refresh setup' in source
+    assert 'Run the Pi sign-in helper in PowerShell' not in source
