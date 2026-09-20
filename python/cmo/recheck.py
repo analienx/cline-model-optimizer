@@ -148,11 +148,19 @@ def run_probe(route_key_value: str, timeout_s: int = RECHECK_TIMEOUT_S) -> dict[
                 "detail": f"probe executor could not start: {exc}"}
     if proc.returncode not in (EXIT_OK,):
         tail = (proc.stderr or proc.stdout or "")[-300:].strip().replace("\n", " ")
-        return {"outcome": "blocked",
-                "reason": f"probe.exit_{proc.returncode}",
-                "detail": tail or f"probe exited {proc.returncode}"}
+        probe_error = {"outcome": "blocked",
+                       "reason": f"probe.exit_{proc.returncode}",
+                       "detail": tail or f"probe exited {proc.returncode}"}
+    else:
+        probe_error = None
+    # The canonical probe exits 0 only for healthy; every classified outcome
+    # (quota/auth/model/error/timeout) exits nonzero WITH the trailing JSON
+    # status line. Parse first: a valid status line always settles by
+    # mapping, and only unparseable output parks as blocked.
     parsed = _parse_probe_output(proc.stdout or "")
     if parsed is None:
+        if probe_error is not None:
+            return probe_error
         return {"outcome": "blocked", "reason": "probe.unparseable_output",
                 "detail": ("probe exited 0 but emitted no trailing JSON status "
                            "line; refusing to treat silence as success")}
