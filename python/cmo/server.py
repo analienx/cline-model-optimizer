@@ -18,10 +18,11 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from . import SCHEMA_NAME, SCHEMA_VERSION, __version__
-from .catalog import DEFAULT_CATALOG_URL, refresh_catalog
+from .catalog import DEFAULT_CATALOG_URL, refresh_catalog, fetch_catalog
 from .db import connect, get_meta
 from .events import EventStore, EventValidationError, EventConflictError, ms_to_iso
 from .recheck import RecheckWorker
+from .resume import request_resume, ResumeRejected
 from .policy import (ALIAS_RE, PolicyError, load_canonical_policy, policy_digest,
                      validate_policy)
 from .snapshot import build_snapshot
@@ -145,7 +146,16 @@ class CmoHandler(BaseHTTPRequestHandler):
         path = parsed.path
         query = parse_qs(parsed.query)
         if path in ("/", "/index.html"):
+            body, ctype = _asset("simple.html")
+            self._send(200, body, ctype)
+        elif path == "/advanced":
             body, ctype = _asset("index.html")
+            self._send(200, body, ctype)
+        elif path == "/simple.js":
+            body, ctype = _asset("simple.js")
+            self._send(200, body, ctype)
+        elif path == "/simple.css":
+            body, ctype = _asset("simple.css")
             self._send(200, body, ctype)
         elif path == "/app.js":
             body, ctype = _asset("app.js")
@@ -153,6 +163,8 @@ class CmoHandler(BaseHTTPRequestHandler):
         elif path == "/style.css":
             body, ctype = _asset("style.css")
             self._send(200, body, ctype)
+        elif path == "/api/simple/catalog":
+            self._simple_catalog()
         elif path == "/api/snapshot":
             goal_id = (query.get("goal_id") or [None])[0]
             strategy = (query.get("strategy") or [None])[0]
@@ -198,6 +210,10 @@ class CmoHandler(BaseHTTPRequestHandler):
                 self._request_recheck(body)
             elif path == "/api/override":
                 self._create_override(body)
+            elif path == "/api/simple/resume":
+                self._resume_goal(body)
+            elif path == "/api/simple/models":
+                self._save_simple_models(body)
             elif path == "/api/policy":
                 self._save_policy(body)
             elif path == "/api/policy/rollback":
@@ -490,6 +506,75 @@ class CmoHandler(BaseHTTPRequestHandler):
                     f"fresh catalog omits new model(s) {missing}; not activated")
         return fresh, unverified
 
+    def _resume_goal(self, body: Any) -> None:
+        if not isinstance(body, dict) or set(body) != {'goal_id'}:
+            raise EventValidationError('resume requires only a Goal identifier')
+        goal_id = body['goal_id']
+        if not isinstance(goal_id, str):
+            raise EventValidationError('invalid Goal identifier')
+        snap = self.service.snapshot(goal_id=goal_id)
+        try:
+            result = request_resume(goal_id, snap.get('decision') or {})
+        except ResumeRejected as exc:
+            self._json(409, {'ok': False, 'error': str(exc)})
+            return
+        self._json(202, result)
+
+    def _simple_catalog(self) -> None:
+        with self.service.store() as store:
+            policy, _, _ = store.active_policy_doc()
+        selected = [r["model"] for r in policy["routes"] if r["tier"] == "free" and r.get("enabled", True)]
+        try:
+            listed = fetch_catalog(self.service.catalog_url)["buckets"].get("free", [])
+            self._json(200, {"ok": True, "free": list(dict.fromkeys(listed)), "selected": selected})
+        except Exception:
+            self._json(200, {"ok": False, "free": selected, "selected": selected,
+                             "message": "Provider catalog unavailable; existing selection can still be reordered."})
+
+    def _save_simple_models(self, body: Any) -> None:
+        if not isinstance(body, dict) or not isinstance(body.get("models"), list):
+            raise EventValidationError("models must be an ordered list")
+        models = body["models"]
+        if not 1 <= len(models) <= 4 or len(set(str(x) for x in models)) != len(models):
+            raise EventValidationError("choose one to four distinct free models")
+        if not all(isinstance(x, str) and 0 < len(x) <= 128 for x in models):
+            raise EventValidationError("invalid free model identifier")
+        with self.service.store() as store:
+            current, _, _ = store.active_policy_doc()
+            existing = {r["model"]: r for r in current["routes"] if r["tier"] == "free"}
+            fresh = [model for model in models if model not in existing]
+            if fresh:
+                try:
+                    offered = set(fetch_catalog(self.service.catalog_url)["buckets"].get("free", []))
+                except Exception as exc:
+                    raise EventValidationError("provider free catalog unavailable; cannot add new models") from exc
+                if any(model not in offered for model in fresh):
+                    raise EventValidationError("new selection includes a model not verified as free")
+            doc = json.loads(json.dumps(current))
+            members = [a["id"] for a in doc["accounts"]]
+            if not members:
+                raise EventValidationError("no enabled accounts")
+            ordered = []
+            for model in models:
+                route = dict(existing[model]) if model in existing else {
+                    "model": model, "provider": "cline", "tier": "free",
+                    "accounts": members, "thinking": "off"}
+                route["enabled"] = True
+                ordered.append(route)
+            ordered.extend({**r, "enabled": False} for r in doc["routes"]
+                           if r["tier"] == "free" and r["model"] not in models)
+            ordered.extend(r for r in doc["routes"] if r["tier"] != "free")
+            doc["routes"] = ordered
+            doc["defaults"]["max_enabled_free_models"] = 4
+            try:
+                valid = validate_policy(doc)
+                saved = store.save_policy_version(valid, created_by="ui",
+                    note="simple dashboard free-model priority", expected_digest=body.get("expected_digest"))
+            except PolicyError as exc:
+                raise EventValidationError(str(exc)) from exc
+            self._json(200, {"ok": True, "result": saved,
+                             "selected": models, "state_revision": store.revision()})
+
     def _save_policy(self, body: Any) -> None:
         if not isinstance(body, dict) or not isinstance(body.get("doc"), dict):
             raise EventValidationError("policy save requires a doc object")
@@ -587,6 +672,8 @@ class CmoHandler(BaseHTTPRequestHandler):
             attached = [r.get("model") for r in routes
                         if isinstance(r, dict) and alias in (r.get("accounts") or [])]
             if op == "add":
+                if len(accounts) >= 5:
+                    raise EventValidationError("maximum five accounts; disable or remove an account first")
                 if alias in by_id:
                     self._json(409, {"ok": False,
                                      "error": f"account {alias} already registered"})
