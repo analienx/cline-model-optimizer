@@ -170,6 +170,9 @@ class CmoHandler(BaseHTTPRequestHandler):
                 self._json(200, {"schema": "cmo.policy/v1",
                                  "versions": store.policy_versions(),
                                  "active": store.active_policy_doc()[1:]})
+        elif path == "/api/policy/canonical":
+            self._json(200, {"schema": "cmo.policy/v1",
+                             "doc": load_canonical_policy()})
         elif path == "/api/stream":
             self._handle_stream()
         else:
