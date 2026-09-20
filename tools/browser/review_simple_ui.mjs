@@ -115,6 +115,9 @@ async function main() {
         buttons: q('button'), selects: q('select'), unlabelledControls: unlabelled.length,
         liveRegions: q('[aria-live]'), skipLinks: q('a.skip'),
         title: document.title, lang: document.documentElement.lang,
+        accountRows: q('.account-item'), expectedAccounts: Number.parseInt(document.getElementById('account-count')?.textContent || '0', 10) || 0,
+        routeRows: q('.route-item'), workRows: q('.work-item'),
+        connection: document.getElementById('connection')?.textContent.trim(),
         stream: document.getElementById('stream')?.textContent,
         stateRevision: window.__cmoSnapshot?.state_revision,
       };
@@ -123,6 +126,9 @@ async function main() {
 
     if (structure.skipLinks < 1) failures.push("missing skip link");
     if (!structure.lang) failures.push("html lang attribute missing");
+    if (structure.connection !== "Connected") failures.push("page is not connected after rendering");
+    if (structure.accountRows !== structure.expectedAccounts) failures.push("account rows did not render");
+    if (structure.routeRows < 1) failures.push("free model rows did not render");
 
     const shot = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true });
     fs.writeFileSync(path.join(OUT, "dashboard-review.png"), Buffer.from(shot.data, "base64"));

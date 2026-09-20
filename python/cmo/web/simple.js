@@ -93,7 +93,7 @@ function renderAccounts(snap){const box=clear($('accounts'));
  const row=el('div','account-item'),avatar=el('span','account-avatar',String(index+1)),main=el('div','item-main');
  const hasEmail=account.label&&account.label.includes('@');
  main.append(el('strong','',hasEmail?account.label:'Email not linked'),el('small','',`${account.id} · ${account.enabled===false?'Not in routing':'Enabled for routing'} · ${account.status==='verified'?'Profile files found; login not tested':account.status||'Not verified'}`));
- const manage=el('details','account-actions'),summary=el('summary','','Manage'),menu=el('div','account-menu');summary.setAttribute('aria-label',Manage );
+ const manage=el('details','account-actions'),summary=el('summary','','Manage'),menu=el('div','account-menu');summary.setAttribute('aria-label','Manage '+account.id);
  menu.append(makeButton('↑ Priority',()=>moveAccount(accounts,index,-1),index===0),makeButton('↓ Priority',()=>moveAccount(accounts,index,1),index===accounts.length-1));
  menu.append(makeButton('Set email',()=>editEmail(account,main)),makeButton('Check profile',()=>verifyAccount(account.id)));
  menu.append(makeButton(account.enabled===false?'Enable':'Disable',()=>toggleAccount(account)));
