@@ -149,7 +149,6 @@ def _reject_fixture_evidence(event: dict[str, Any], db_path: str | Path) -> None
         if account in TRUNCATED_IDENTITIES or model in TRUNCATED_IDENTITIES:
             raise EventValidationError(
                 "truncated route identity is not accepted on the live evidence store")
-    return int(time.time() * 1000)
 
 
 def iso_to_ms(value: Any) -> int:

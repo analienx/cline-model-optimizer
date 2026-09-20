@@ -11,7 +11,7 @@ from typing import Any
 
 from . import SNAPSHOT_SCHEMA, __version__
 from .decision import DecisionEngine
-from .events import ms_to_iso, now_ms
+from .events import (FIXTURE_GOAL_IDS, FIXTURE_SOURCES, ms_to_iso, now_ms)
 from .policy import (REASON_OVERRIDE, STRATEGY_FREE_FIRST, TIER_FREE,
                      TIER_SUBSCRIPTION, load_canonical_policy, policy_digest,
                      route_cells)
@@ -192,8 +192,8 @@ def _data_quality(store: Any, now: int) -> dict[str, Any]:
     must be quarantined (see ``migration.quarantine_fixtures``) before the
     dashboard can be treated as trustworthy.
     """
-    fixture_sources = ("browser-acceptance", "fixture", "synthetic-fixture",
-                       "goal-42-harness")
+    fixture_sources = tuple(sorted(FIXTURE_SOURCES))
+    fixture_goals = set(FIXTURE_GOAL_IDS)
     counts: dict[str, int] = {}
     fixture_events = 0
     truncated_identities = 0
@@ -204,7 +204,7 @@ def _data_quality(store: Any, now: int) -> dict[str, Any]:
     for event in rows:
         source = event.get("source_component") or "unknown"
         counts[source] = counts.get(source, 0) + 1
-        if source in fixture_sources or event.get("goal_id") == "goal-42":
+        if source in fixture_sources or event.get("goal_id") in fixture_goals:
             fixture_events += 1
         account = event.get("account_alias") or ""
         model = event.get("model") or ""
@@ -329,8 +329,7 @@ def _unknown_reason(state: str, row: dict[str, Any], age: int | None, ttl: int,
     if state not in ("UNKNOWN", "STALE", "QUOTA_EXPIRED"):
         return None
     source = row.get("evidence_source") if row else None
-    if source in ("browser-acceptance", "fixture", "synthetic-fixture",
-                  "goal-42-harness"):
+    if source in FIXTURE_SOURCES:
         return ("evidence comes from a synthetic/fixture source; "
                 "quarantine fixture data before trusting this route")
     if not row or not row.get("observed_at"):
