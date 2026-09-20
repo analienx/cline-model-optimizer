@@ -22,6 +22,21 @@ const S = {
 const $ = (id) => document.getElementById(id);
 const goalSelect = $("goal-select");
 
+/* Goal/strategy selection persists across reloads (D04). View persists via
+   the URL hash in showView/initViews. Storage failures (private mode,
+   disabled storage) degrade to per-session selection, never to an error. */
+function readStored(key) {
+  try { return localStorage.getItem(key) || ""; } catch (e) { return ""; }
+}
+function writeStored(key, value) {
+  try {
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+  } catch (e) { /* selection simply does not persist */ }
+}
+S.goalId = readStored("cmo.goalId");
+S.previewStrategy = readStored("cmo.previewStrategy");
+
 function el(tag, attrs = {}, children = []) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -306,7 +321,15 @@ function renderGoalSelect(snap) {
     goalSelect.append(el("option", { value: g.goal_id },
       [`${g.display_status || g.status}: ${g.goal_id.slice(0, 22)}${g.goal_id.length > 22 ? "…" : ""}${live}`]));
   }
-  goalSelect.value = current || S.goalId || "";
+  // A stored selection for a Goal that no longer reports is dropped (and
+  // forgotten) instead of lingering as a phantom selection.
+  const wanted = current || S.goalId || "";
+  const known = !wanted || snap.goals.some((g) => g.goal_id === wanted);
+  goalSelect.value = known ? wanted : "";
+  if (S.goalId !== goalSelect.value) {
+    S.goalId = goalSelect.value;
+    writeStored("cmo.goalId", S.goalId);
+  }
 }
 
 function isLiveGoal(g) {
@@ -1113,8 +1136,8 @@ $("policy-rollback").addEventListener("click", async () => {
 });
 
 $("refresh").addEventListener("click", loadSnapshot);
-goalSelect.addEventListener("change", () => { S.goalId = goalSelect.value; loadSnapshot(); });
-$("preview-strategy").addEventListener("change", () => { S.previewStrategy = $("preview-strategy").value; loadSnapshot(); });
+goalSelect.addEventListener("change", () => { S.goalId = goalSelect.value; writeStored("cmo.goalId", S.goalId); loadSnapshot(); });
+$("preview-strategy").addEventListener("change", () => { S.previewStrategy = $("preview-strategy").value; writeStored("cmo.previewStrategy", S.previewStrategy); loadSnapshot(); });
 $("evt-apply").addEventListener("click", () => {
   S.eventFilter = { event_type: $("evt-type").value.trim(), source: $("evt-source").value.trim() };
   render();
@@ -1149,5 +1172,11 @@ S.timers.push(setInterval(tickAges, 1000));
 S.timers.push(setInterval(() => { if (S.stream !== "live") loadSnapshot(); }, 5000));
 
 initViews();
+if (S.previewStrategy) {
+  const sel = $("preview-strategy");
+  const known = [...sel.options].some((o) => o.value === S.previewStrategy);
+  sel.value = known ? S.previewStrategy : "";
+  if (!known) { S.previewStrategy = ""; writeStored("cmo.previewStrategy", ""); }
+}
 loadSnapshot();
 connectStream();
