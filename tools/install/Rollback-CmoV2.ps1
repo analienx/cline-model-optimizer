@@ -129,6 +129,18 @@ if ($mode -eq 'live') {
       }
     }
   }
+  # Startup-folder autostart fallback: remove exactly the launcher the
+  # install created (tracked via receipt.autostart).
+  $autostartAction = 'none'
+  if ($receipt.autostart -eq 'startup-folder') {
+    $startupServicePath = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup\ClineModelOptimizer-Service.cmd'
+    if (Test-Path -LiteralPath $startupServicePath) {
+      Remove-Item -LiteralPath $startupServicePath -Force
+      $autostartAction = 'removed-created'
+    } else {
+      $autostartAction = 'already-absent'
+    }
+  }
   Write-Host 'live: v2 task unregistered; legacy guardian re-enabled'
 } else {
   $shortcutAction = 'drill-skipped'
@@ -172,6 +184,7 @@ if ((Test-Path -LiteralPath $v2Dir) -and -not (Get-ChildItem -LiteralPath $v2Dir
 Write-Host ("rollback: {0} staged file(s) removed, {1} backed-up file(s) restored" -f $removed.Count, $restored.Count)
 
 $rollback = @{
+  autostart            = @{ action = $autostartAction; mode = $receipt.autostart }
   backupDir            = $BackupFull
   dashboardShortcut    = @{ action = $shortcutAction; path = $receipt.dashboardShortcut }
   installRoot          = $InstallFull
