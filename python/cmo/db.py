@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS events (
     capability TEXT,
     repo TEXT,
     work_state TEXT,
+    session_ref TEXT,
     free_only INTEGER,
     safe_detail TEXT,
     payload_hash TEXT NOT NULL
@@ -181,6 +182,15 @@ _RECHECK_COLUMNS = ("started_at", "finished_at", "lease_owner", "attempt",
                     "last_error")
 
 
+def _ensure_events_session_ref(conn: sqlite3.Connection) -> None:
+    """Legacy v2 DBs lack events.session_ref; add it so goal/attempt identity
+    events can carry their session without a rebuild."""
+    existing = {row["name"] for row in
+                conn.execute("PRAGMA table_info(events)").fetchall()}
+    if "session_ref" not in existing:
+        conn.execute("ALTER TABLE events ADD COLUMN session_ref TEXT")
+
+
 def _ensure_recheck_columns(conn: sqlite3.Connection) -> None:
     existing = {row["name"] for row in
                 conn.execute("PRAGMA table_info(recheck_requests)").fetchall()}
@@ -242,6 +252,7 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
+    _ensure_events_session_ref(conn)
     _ensure_recheck_columns(conn)
     _ensure_policy_digest_nonunique(conn)
     row = conn.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()

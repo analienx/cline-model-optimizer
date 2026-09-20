@@ -32,7 +32,7 @@ EVENT_FIELDS = (
     "event_id", "event_type", "occurred_at", "source_component", "source_instance",
     "goal_id", "attempt_id", "strategy", "account_alias", "provider", "model",
     "tier", "reason_code", "reset_after_ms", "reset_known", "capability",
-    "repo", "work_state", "free_only", "safe_detail",
+    "repo", "work_state", "session_ref", "free_only", "safe_detail",
 )
 
 EVENT_TYPES = {
@@ -247,7 +247,7 @@ def normalize_event(raw: dict[str, Any]) -> dict[str, Any]:
 
     for field in ("source_component", "source_instance", "goal_id", "attempt_id",
                   "strategy", "account_alias", "provider", "model", "reason_code",
-                  "capability", "repo", "work_state"):
+                  "capability", "repo", "work_state", "session_ref"):
         event[field] = _clean_string(event[field], field)
 
     tier = event["tier"]
@@ -790,7 +790,7 @@ def _apply_attempt_started(conn: sqlite3.Connection, event: dict[str, Any],
         (attempt_id, goal_id, event.get("route_key"), event.get("model"),
          event.get("provider"), event.get("account_alias"), event.get("tier"),
          event["occurred_at"], event["occurred_at"], event.get("reason_code"),
-         event.get("work_state")))
+         event.get("session_ref") or event.get("work_state")))
     if goal_id:
         conn.execute("UPDATE goals SET attempt_count=attempt_count+1, last_activity_at=?, "
                      "updated_at=? WHERE goal_id=?",
@@ -803,8 +803,9 @@ def _apply_attempt_heartbeat(conn: sqlite3.Connection, event: dict[str, Any],
     attempt_id = event.get("attempt_id")
     if not attempt_id:
         return "noop"
-    conn.execute("UPDATE attempts SET last_heartbeat_at=? WHERE attempt_id=?",
-                 (event["occurred_at"], attempt_id))
+    conn.execute("UPDATE attempts SET last_heartbeat_at=?, "
+                 "session_ref=COALESCE(?, session_ref) WHERE attempt_id=?",
+                 (event["occurred_at"], event.get("session_ref"), attempt_id))
     if event.get("goal_id"):
         conn.execute("UPDATE goals SET last_activity_at=?, updated_at=? WHERE goal_id=?",
                      (event["occurred_at"], event["occurred_at"], event["goal_id"]))
@@ -840,7 +841,7 @@ def _ensure_goal(conn: sqlite3.Connection, goal_id: str, event: dict[str, Any]) 
             "VALUES(?,?,?,?,?,'active',?,?,?,?,?)",
             (goal_id, event.get("repo"), strategy,
              "free-first" if free_only else strategy, free_only,
-             event.get("work_state"), event["occurred_at"], event["occurred_at"],
+             event.get("session_ref"), event["occurred_at"], event["occurred_at"],
              event["occurred_at"], event.get("reason_code")))
 
 
@@ -864,9 +865,9 @@ def _apply_goal(conn: sqlite3.Connection, event: dict[str, Any], received: int) 
     if event.get("reason_code"):
         sets.append("reason_code=?")
         args.append(event["reason_code"])
-    if event.get("work_state"):
+    if event.get("session_ref"):
         sets.append("session_ref=?")
-        args.append(event["work_state"])
+        args.append(event["session_ref"])
     if event.get("repo"):
         sets.append("repo=?")
         args.append(event["repo"])

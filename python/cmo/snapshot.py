@@ -182,7 +182,7 @@ def _derive_goal_liveness(goals: list[dict[str, Any]], now: int) -> list[dict[st
         view["last_activity_age_ms"] = (now - int(last)) if last else None
         view["liveness"] = "live"
         if view.get("status") == "active" and last \
-                and now - int(last) > DISCONNECTED_AFTER_MS and not view.get("session_ref"):
+                and now - int(last) > DISCONNECTED_AFTER_MS:
             view["liveness"] = "disconnected"
             view["display_status"] = "disconnected"
         else:
