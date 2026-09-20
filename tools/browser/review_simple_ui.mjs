@@ -86,7 +86,7 @@ async function main() {
     await send("Page.navigate", { url: `${BASE}/` });
     await loaded;
     for (let i = 0; i < 60; i += 1) {
-      const ok = await evaluate("!!(window.__cmoSnapshot && window.__cmoSnapshot.cells)");
+      const ok = await evaluate("document.getElementById('connection')?.textContent.trim() === 'Connected' && document.querySelectorAll('.account-item').length === Number.parseInt(document.getElementById('account-count')?.textContent || '0', 10)");
       if (ok) break;
       await sleep(250);
     }
@@ -129,6 +129,7 @@ async function main() {
     if (structure.connection !== "Connected") failures.push("page is not connected after rendering");
     if (structure.accountRows !== structure.expectedAccounts) failures.push("account rows did not render");
     if (structure.routeRows < 1) failures.push("free model rows did not render");
+    if (await evaluate("document.querySelectorAll('.route-item.model-ready,.route-item.model-exhausted,.route-item.model-partial,.route-item.model-recheck,.route-item.model-unknown').length") !== structure.routeRows) failures.push('model evidence colors not assigned to all rows');
 
     const shot = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: true });
     fs.writeFileSync(path.join(OUT, "dashboard-review.png"), Buffer.from(shot.data, "base64"));

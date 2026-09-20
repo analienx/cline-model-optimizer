@@ -148,9 +148,14 @@ class CmoHandler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             body, ctype = _asset("simple.html")
             self._send(200, body, ctype)
-        elif path == "/advanced":
-            body, ctype = _asset("index.html")
+        elif path in ("/advanced", "/advanced/"):
+            body, ctype = _asset("advanced.html")
             self._send(200, body, ctype)
+        elif path == "/advanced.js":
+            body, ctype = _asset("advanced.js")
+            self._send(200, body, ctype)
+        elif path == "/api/simple/accounts/readiness":
+            self._simple_account_readiness()
         elif path == "/simple.js":
             body, ctype = _asset("simple.js")
             self._send(200, body, ctype)
@@ -519,6 +524,40 @@ class CmoHandler(BaseHTTPRequestHandler):
             self._json(409, {'ok': False, 'error': str(exc)})
             return
         self._json(202, result)
+
+    def _simple_account_readiness(self) -> None:
+        """Local Pi profile hints only: credential presence is not live login or entitlement."""
+        root = Path(os.environ.get("PI_PROFILE_ROOT", "").strip() or
+                    str(Path.home() / ".pi" / "supervisor-accounts"))
+        with self.service.store() as store:
+            policy, _, _ = store.active_policy_doc()
+        accounts = []
+        for entry in policy.get("accounts", []):
+            alias = entry.get("id", "")
+            profile = entry.get("profile") or alias
+            if not ALIAS_RE.fullmatch(alias) or not ALIAS_RE.fullmatch(profile):
+                continue
+            agent = root / profile / "agent"
+            path = agent / "auth.json"
+            providers = set()
+            # Read only the provider keys, never return credential material or
+            # infer live auth, identity, subscription or remaining quota.
+            try:
+                if path.is_file():
+                    with path.open("r", encoding="utf-8") as handle:
+                        document = json.load(handle)
+                    if isinstance(document, dict):
+                        providers = {key for key in ("cline", "cline-pass")
+                                     if isinstance(document.get(key), dict)}
+            except (OSError, ValueError, UnicodeError):
+                providers = set()
+            accounts.append({"id": alias, "profile_exists": agent.is_dir(),
+                             "cline_saved": "cline" in providers,
+                             "pass_saved": "cline-pass" in providers,
+                             "checked_at": int(time.time() * 1000),
+                             "live_auth_verified": False,
+                             "pass_entitlement_verified": False})
+        self._json(200, {"schema": "cmo.account-readiness/v1", "accounts": accounts})
 
     def _simple_catalog(self) -> None:
         with self.service.store() as store:

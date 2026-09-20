@@ -1,6 +1,6 @@
 "use strict";
 const $ = id => document.getElementById(id);
-const state = {snap:null, catalog:[], selected:[], saved:[], dirty:false, loading:false, connected:false};
+const state = {snap:null, catalog:[], selected:[], saved:[], dirty:false, loading:false, connected:false, readiness:{}};
 const el = (tag,cls,text) => {const x=document.createElement(tag);if(cls)x.className=cls;if(text!==undefined)x.textContent=String(text);return x;};
 const clear = n => {n.replaceChildren();return n;};
 const api = async (url, opts={}) => {const response=await fetch(url,{cache:'no-store',...opts});const data=await response.json();if(!response.ok)throw Error(data.error||`HTTP ${response.status}`);return data;};
@@ -63,8 +63,25 @@ function renderRouter(snap){const box=clear($('route-status'));
  if(cell&&(status==='QUOTA_EXPIRED'||status==='QUOTA'&&cell.reset_at&&Number(cell.reset_at)<=Date.now()))chip.append(makeButton('Recheck',()=>recheckRoute(cell)));
  cells.push(chip);}
  allVerified+=verified;allRoutes+=enabled.length;allExpired+=needsCheck;allCooling+=cooling;
- let summary=verified?`${verified} account${verified===1?'':'s'} verified recently`:cooling===enabled.length&&enabled.length?'All accounts cooling down':needsCheck?'Recheck needed':auth?'Sign-in needed':'Availability unknown';
- text.append(el('em','',summary));const detail=el('details','route-details'),toggle=el('summary','',`Accounts ${enabled.length}  ·  Details`),content=el('div','route-expanded');
+ const blockedCount=cooling,unavailable=auth+cooling;
+ const severity=verified?'model-ready':cooling===enabled.length&&enabled.length?'model-exhausted':
+   unavailable&&unavailable<enabled.length?'model-partial':needsCheck?'model-recheck':'model-unknown';
+ row.classList.add(severity);
+ let summary=verified?`${verified} of ${enabled.length} accounts recently verified`:
+   cooling===enabled.length&&enabled.length?`All ${enabled.length} accounts quota-blocked`:
+   unavailable?`${unavailable} of ${enabled.length} accounts blocked ? others need checking`:
+   needsCheck?`${needsCheck} of ${enabled.length} need recheck`:'No account availability verified';
+ text.append(el('em','',summary));const markers=el('div','route-markers');
+ for(const account of enabled){const cell=evidence?.accounts?.[account.id],current=cell?.state;
+ const readiness=state.readiness[account.id];const cls=readiness&&!readiness.cline_saved?'unverified':
+   current==='AVAILABLE'&&cell?.freshness==='fresh'?'good':
+   current==='QUOTA'&&(!cell.reset_at||Number(cell.reset_at)>Date.now())?'bad':
+   current==='AUTH_BLOCKED'?'bad':current==='QUOTA_EXPIRED'?'pending':'unverified';
+ const dot=el('span','route-marker '+cls,account.id.replace('account-','A'));
+ dot.title=`${account.id}: ${readiness&&!readiness.cline_saved?'Pi Cline sign-in missing':
+   cls==='good'?'Recently verified':cls==='bad'?'Blocked':cls==='pending'?'Needs recheck':'Unknown'}`;
+ dot.setAttribute('aria-label',dot.title);markers.append(dot);}
+ text.append(markers);const detail=el('details','route-details'),toggle=el('summary','',`Accounts ${enabled.length}  ?  Details`),content=el('div','route-expanded');
  if(cells.length)content.append(...cells);else content.append(el('span','muted','No enabled account assigned to this model.'));
  detail.append(toggle,content);row.append(title,detail);box.append(row);}
  $('routing-summary').textContent=allVerified?`${allVerified} of ${allRoutes} account-model routes verified recently`:`No free route verified now · ${allCooling} cooling down · ${allExpired} ready to recheck`;
@@ -91,8 +108,24 @@ function renderAccounts(snap){const box=clear($('accounts'));
  $('new-email').disabled=!add;$('add-account').querySelector('button').disabled=!add;
  for(const [index,account] of accounts.entries()){
  const row=el('div','account-item'),avatar=el('span','account-avatar',String(index+1)),main=el('div','item-main');
- const hasEmail=account.label&&account.label.includes('@');
- main.append(el('strong','',hasEmail?account.label:'Email not linked'),el('small','',`${account.id} · ${account.enabled===false?'Not in routing':'Enabled for routing'} · ${account.status==='verified'?'Profile files found; login not tested':account.status||'Not verified'}`));
+ const hasEmail=account.label&&account.label.includes('@');const ready=state.readiness[account.id];
+ const profileState=!ready?'Profile not checked':!ready.profile_exists?'Pi profile missing':
+   !ready.cline_saved?'Pi sign-in missing':'Pi sign-in saved ? live login and email unverified';
+ const routeState=account.enabled===false?'Not in routing':ready&&!ready.cline_saved?'Enabled in preferences ? NOT route-ready':'Enabled for routing';
+ main.append(el('strong','',hasEmail?account.label:'Email not linked'),el('small','',`${account.id} ? ${routeState} ? ${profileState}`));
+ const pass=el('div','pass-line');const passMessage=!ready?'ClinePass status not checked':!ready.profile_exists?'ClinePass: profile not created':
+   ready.pass_saved?'ClinePass sign-in saved ? plan and usage not synced here':'ClinePass not signed in to this Pi profile';
+ pass.append(el('span','',passMessage));
+ if(ready?.pass_saved){const link=el('a','pass-link','View 5h / week / month limits ?');link.href='https://app.cline.bot/dashboard';link.target='_blank';link.rel='noopener noreferrer';link.title='Open Cline dashboard; select this same account to view its live limits';pass.append(link);}
+ main.append(pass);
+ if(ready&&!ready.cline_saved){const guide=el('details','account-guide'),sum=el('summary','','How to connect this account');const body=el('div','account-guide-body');
+ if(!ready.profile_exists){body.append(el('p','',`1. Create the isolated Pi profile for ${account.id} using this scoped command. It will not copy credentials or affect existing profiles:`));
+ const provision=el('code','',String.raw`powershell -NoProfile -File "C:\Workspace\repos\config\tools\pi\Provision-PiClineAccount.ps1" -Account ${account.id}`);body.append(provision);
+ }else{body.append(el('p','',`Your isolated Pi profile ${account.id} exists. Next, sign in to THIS Pi profile using the helper below.`));}
+ const cmd=el('code','',String.raw`powershell -NoProfile -File "C:\Workspace\repos\config\tools\pi\Initialize-PiClineAccount.ps1" -Account ${account.id}`);
+ body.append(el('p','','Run the Pi sign-in helper in PowerShell. Complete browser sign-in with this exact account:'),cmd,
+   el('p','','Then select Check profile. It confirms local files only. Live identity, matching email, subscription and quota still require separate verification.'));
+ guide.append(sum,body);main.append(guide);}
  const manage=el('details','account-actions'),summary=el('summary','','Manage'),menu=el('div','account-menu');summary.setAttribute('aria-label','Manage '+account.id);
  menu.append(makeButton('↑ Priority',()=>moveAccount(accounts,index,-1),index===0),makeButton('↓ Priority',()=>moveAccount(accounts,index,1),index===accounts.length-1));
  menu.append(makeButton('Set email',()=>editEmail(account,main)),makeButton('Check profile',()=>verifyAccount(account.id)));
@@ -103,15 +136,15 @@ function renderAccounts(snap){const box=clear($('accounts'));
 async function mutateAccount(body){const result=await send('/api/accounts',body);tell(`Account ${body.id} updated. Existing Pi attempts are not interrupted.`);await load(true);return result;}
 function editEmail(account,main){if(main.querySelector('form'))return;const form=el('form','email-editor'),input=el('input','email-input');input.type='email';input.required=true;input.maxLength=64;input.autocomplete='off';input.placeholder='Email label for this Pi profile';input.value=account.label?.includes('@')?account.label:'';
 const button=el('button','secondary','Save email');button.type='submit';form.append(input,button);form.addEventListener('submit',async ev=>{ev.preventDefault();try{await mutateAccount({op:'update',id:account.id,label:input.value.trim(),note:'user supplied account email label'});}catch(e){tell('Email could not be saved: '+e.message,true);}});main.append(form);input.focus();}
-async function verifyAccount(id){try{const result=await send('/api/accounts',{op:'verify',id});const status=result.check?.status||'unknown';tell(`${id}: profile check reports ${status}. This checks local files, not live authentication.`);await load(true);}catch(e){tell('Profile check failed: '+e.message,true);}}
+async function verifyAccount(id){try{const result=await send('/api/accounts',{op:'verify',id});const status=result.check?.status||'unknown';tell(`${id}: ${status==='tracked'?'Pi profile missing. Create a separate Pi profile and sign in there first.':status==='verified'?'Pi auth files found. Live login and email identity are not yet verified.':'Pi profile exists, but sign-in is not complete.'}`);await load(true);}catch(e){tell('Profile check failed: '+e.message,true);}}
 async function toggleAccount(account){try{await mutateAccount({op:'update',id:account.id,enabled:account.enabled===false,note:'simple dashboard account toggle'});}catch(e){tell('Cannot update account: '+e.message,true);}}
 async function moveAccount(accounts,index,delta){const other=accounts[index+delta];if(!other)return;
 try{const doc=JSON.parse(JSON.stringify(state.snap.policy));const mine=doc.accounts.find(a=>a.id===accounts[index].id),theirs=doc.accounts.find(a=>a.id===other.id);[mine.priority,theirs.priority]=[theirs.priority,mine.priority];
 await send('/api/policy',{doc,expected_digest:state.snap.policy.digest,note:'simple dashboard account priority'});tell('Account priority saved for later route decisions.');await load(true);}catch(e){tell('Account priority could not be saved: '+e.message,true);}}
 async function addAccount(event){event.preventDefault();const email=$('new-email').value.trim();const accounts=state.snap.policy.accounts||[];if(accounts.length>=5)return tell('Maximum five accounts.',true);
 const used=new Set(accounts.map(a=>a.id));let id='';for(let i=1;i<=5;i++){if(!used.has(`account-${i}`)){id=`account-${i}`;break;}}if(!id)return tell('No account slot available.',true);
-try{await mutateAccount({op:'add',id,label:email,profile:id,enabled:false,attach_routes:state.saved,note:'simple dashboard add tracked account'});$('new-email').value='';tell(`${id} added with email label. This account is disabled until you complete sign-in, check its profile and enable it.`);}catch(e){tell('Account could not be added: '+e.message,true);}}
-async function load(preserve=false){if(state.loading)return;state.loading=true;try{const snap=await api('/api/snapshot');state.snap=snap;state.connected=true;const status=$('connection');status.textContent='Connected';status.className='status good';renderRouter(snap);renderWork(snap);renderAccounts(snap);
+try{await mutateAccount({op:'add',id,label:email,profile:id,enabled:false,attach_routes:state.saved,note:'simple dashboard add tracked account'});$('new-email').value='';tell(`${id} added as a disabled slot. Open its How to connect guide, create its separate Pi profile, sign in there, then check it before enabling.`);}catch(e){tell('Account could not be added: '+e.message,true);}}
+async function load(preserve=false){if(state.loading)return;state.loading=true;try{const [snap,readiness]=await Promise.all([api('/api/snapshot'),api('/api/simple/accounts/readiness')]);state.snap=snap;state.readiness=Object.fromEntries((readiness.accounts||[]).map(a=>[a.id,a]));state.connected=true;const status=$('connection');status.textContent='Connected';status.className='status good';renderRouter(snap);renderWork(snap);renderAccounts(snap);
 const saved=(snap.policy.routes||[]).filter(r=>r.tier==='free'&&r.enabled!==false).slice(0,4).map(r=>r.model);if(!state.dirty||!preserve){state.selected=[...saved];state.saved=[...saved];state.dirty=false;}else{state.saved=[...saved];state.dirty=JSON.stringify(state.selected)!==JSON.stringify(saved);}state.catalog=[...new Set([...state.catalog,...saved])];renderModels();}
 catch(e){state.connected=false;const status=$('connection');status.textContent='Disconnected';status.className='status bad';tell('Connection lost. Saved information may be stale. Changes are disabled until the service responds.',true);$('save-models').disabled=true;}finally{state.loading=false;}}
 $('refresh').addEventListener('click',()=>load(true));$('save-models').addEventListener('click',saveModels);$('add-account').addEventListener('submit',addAccount);
