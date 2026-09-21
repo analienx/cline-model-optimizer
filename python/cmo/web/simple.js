@@ -1,6 +1,6 @@
 "use strict";
 const $ = id => document.getElementById(id);
-const state = {snap:null, catalog:[], selected:[], saved:[], dirty:false, loading:false, connected:false, readiness:{},setupHelp:null};
+const state = {snap:null, catalog:[], selected:[], saved:[], dirty:false, loading:false, connected:false, readiness:{},setupHelp:null,usage:{},goalDetails:{},goalRequests:{},usageInitialized:false,removal:{}};
 const el = (tag,cls,text) => {const x=document.createElement(tag);if(cls)x.className=cls;if(text!==undefined)x.textContent=String(text);return x;};
 const clear = n => {n.replaceChildren();return n;};
 const api = async (url, opts={}) => {const response=await fetch(url,{cache:'no-store',...opts});const data=await response.json();if(!response.ok)throw Error(data.error||`HTTP ${response.status}`);return data;};
@@ -10,18 +10,53 @@ const ago = ms => {if(!Number.isFinite(ms)||ms<=0)return 'No verified activity';
 function tell(message,error=false){const node=$('message');node.textContent=message;node.className=error?'message error':'message';node.hidden=false;}
 function makeButton(text,callback,disabled=false){const b=el('button','small',text);b.type='button';b.disabled=disabled;b.addEventListener('click',callback);return b;}
 function goalName(goal){if(goal.goal_id==='1452826a-661e-4a0d-b88a-6054c2de5a25')return 'Shiftio';if(goal.goal_id==='1c2ccdda-855a-4d2c-b75d-4897b31ae8d1')return 'CMO dashboard';if(goal.goal_id==='goal-cmo-trustworthy-20260919')return 'CMO migration · legacy';return goal.repo?.split('/').pop()||'Unidentified saved Goal';}
-async function resumeGoal(goalId){
- try{const result=await send('/api/simple/resume',{goal_id:goalId});
- tell(result.message||'Resume requested. Checking the Goal handshake; execution is not yet confirmed.');
- await load(true);
- }catch(error){tell('Resume not started: '+error.message,true);}
+const when = ms => Number(ms)>0?new Date(Number(ms)).toLocaleString():'Not recorded';
+function goalMessage(goalId,message,error=false){
+ state.goalRequests[goalId]={message,error};renderWork(state.snap);
 }
-async function explainGoal(goalId){
- try{const snap=await api('/api/snapshot?goal_id='+encodeURIComponent(goalId));
- const d=snap.decision||{};const r=d.route||{};
- tell((d.action==='BLOCKED'?'Blocked: ':'Next routing decision: ')+(d.reason||'No verified route evidence')+
- (r.model?' · '+names(r.model)+' / '+r.account_alias:''),d.action==='BLOCKED');
- }catch(error){tell('Goal details unavailable: '+error.message,true);}
+async function fetchGoalDetails(goalId){
+ state.goalDetails[goalId]={open:true,loading:true};renderWork(state.snap);
+ try{
+  const [snap,check]=await Promise.all([
+   api('/api/snapshot?goal_id='+encodeURIComponent(goalId)),
+   api('/api/simple/resume/readiness?goal_id='+encodeURIComponent(goalId))]);
+  state.goalDetails[goalId]={open:true,loading:false,snap,check};
+ }catch(e){state.goalDetails[goalId]={open:true,loading:false,error:e.message};}
+ renderWork(state.snap);
+}
+async function resumeGoal(goalId){
+ goalMessage(goalId,'Checking the saved session and the next free route…');
+ try{
+  const check=await api('/api/simple/resume/readiness?goal_id='+encodeURIComponent(goalId));
+  if(!check.ready){goalMessage(goalId,'Not started: '+check.reason,true);await fetchGoalDetails(goalId);return;}
+  const result=await send('/api/simple/resume',{goal_id:goalId});
+  goalMessage(goalId,(result.message||'Resume requested')+' This is not yet a verified running session.');
+  await load(true);await fetchGoalDetails(goalId);
+ }catch(e){goalMessage(goalId,'Resume not started: '+e.message,true);await fetchGoalDetails(goalId);}
+}
+function renderGoalDetails(target,goal){
+ const info=state.goalDetails[goal.goal_id];if(!info?.open)return;
+ const panel=el('div','goal-detail');panel.setAttribute('role','region');
+ panel.setAttribute('aria-label','Details for '+goalName(goal));
+ if(info.loading){panel.append(el('p','muted','Loading saved session and readiness checks…'));target.append(panel);return;}
+ if(info.error){panel.append(el('p','goal-warning','Details unavailable: '+info.error));target.append(panel);return;}
+ const snap=info.snap||state.snap, g=(snap.goals||[]).find(x=>x.goal_id===goal.goal_id)||goal;
+ const fields=el('dl','goal-facts');
+ for(const [label,value] of [['Saved state',g.status||'unknown'],['Executor evidence',g.liveness||'unverified'],
+ ['Last activity',when(g.last_activity_at)],['Attempts recorded',g.attempt_count??'unknown'],
+ ['Routing policy',g.free_only?'Free models only':g.strategy||'unknown'],['Last reason',g.reason_code||'No reason recorded']]){
+  const item=el('div','goal-fact');item.append(el('dt','',label),el('dd','',value));fields.append(item);}
+ panel.append(fields);
+ const attempts=(snap.attempts||[]).filter(a=>a.goal_id===g.goal_id).sort((a,b)=>Number(b.started_at||0)-Number(a.started_at||0));
+ if(attempts.length){const a=attempts[0];panel.append(el('p','goal-line','Last attempt: '+names(a.model||'unknown')+' · '+(a.account_alias||'Unknown account')+' · '+(a.status||'unknown')+' · '+when(a.started_at)));
+  if(a.reason_code)panel.append(el('p','goal-line','Attempt reason: '+a.reason_code));
+  if(a.liveness!=='live')panel.append(el('p','goal-warning','Last attempt is not verified as a running executor.'));}
+ const d=snap.decision||{},r=d.route||{};
+ panel.append(el('p','goal-line','Next free route: '+(r.model?names(r.model)+' / '+r.account_alias:'None')+' · '+(d.action||'Unknown')+' · '+(d.reason||'No route reason')));
+ if(info.check){panel.append(el('p',info.check.ready?'goal-ready':'goal-warning',
+  (info.check.ready?'Resume preflight passed: ':'Resume blocked: ')+(info.check.reason||'No result')));}
+ if(goalName(goal)==='Shiftio'){const link=el('a','goal-issue','View Shiftio issue #56');link.href='https://github.com/analienx/Shiftio/issues/56';link.target='_blank';link.rel='noopener noreferrer';panel.append(link);}
+ target.append(panel);
 }
 function renderWork(snap){const box=clear($('work'));const goals=snap.goals||[];
  if(!goals.length){box.append(el('p','muted','No saved projects yet.'));return;}
@@ -32,11 +67,16 @@ function renderWork(snap){const box=clear($('work'));const goals=snap.goals||[];
  else if(goal.liveness==='live'&&last>0&&age<90000)status='Recent telemetry';
  const name=goalName(goal),flag=el('span','work-status '+(['Blocked','Disconnected'].includes(status)?'bad':status==='Completed'?'good':''),status);
  main.append(el('strong','',name),el('small','',`Last recorded ${ago(last)} · ${status==='Recent telemetry'?'executor not independently verified':goal.status||'saved'}`));
- if(name==='CMO dashboard'&&status==='Disconnected')main.append(el('div','work-hint','Coding session stopped during takeover; saved history is intact.'));
- actions.append(makeButton('Details',()=>explainGoal(goal.goal_id)));
+ if(name==='CMO dashboard'&&status==='Disconnected')main.append(el('div','work-hint','Saved history exists; no running executor verified.'));
+ const details=makeButton(state.goalDetails[goal.goal_id]?.open?'Hide details':'Details',()=>{
+  if(state.goalDetails[goal.goal_id]?.open){state.goalDetails[goal.goal_id].open=false;renderWork(state.snap);}
+  else fetchGoalDetails(goal.goal_id);});details.setAttribute('aria-expanded',String(!!state.goalDetails[goal.goal_id]?.open));actions.append(details);
  if(name==='Shiftio'&&['Blocked','Paused','Disconnected','Activity unverified'].includes(status)){
- const b=makeButton('Check & resume',()=>resumeGoal(goal.goal_id));b.classList.add('primary');actions.append(b);}
- right.append(flag,actions);row.append(main,right);box.append(row);}
+  const b=makeButton('Check & resume',()=>resumeGoal(goal.goal_id));b.classList.add('primary');actions.append(b);}
+ right.append(flag,actions);row.append(main,right);
+ const feedback=state.goalRequests[goal.goal_id];if(feedback)row.append(el('p',feedback.error?'goal-warning':'goal-ready',feedback.message));
+ renderGoalDetails(row,goal);box.append(row);
+ }
 }
 async function recheckRoute(cell){try{await send('/api/route/recheck',{route_key:cell.route_key,account_alias:cell.account_alias,provider:cell.provider,model:cell.model,tier:cell.tier,reason:'User requested one bounded free-route recheck'});tell('One bounded recheck queued. A refreshed state will appear after provider evidence arrives.');await load(true);}catch(error){tell('Recheck refused: '+error.message,true);}}
 function renderRouter(snap){const box=clear($('route-status'));
@@ -167,6 +207,73 @@ function accountFreeEvidence(snap,id){
  const latest=Math.max(0,...success.map(c=>Number(c.observed_at)||0));
  return {latest,recent:success.some(c=>c.state==='AVAILABLE'&&c.freshness==='fresh')};
 }
+async function refreshAccountUsage(id){
+ state.usage[id]={loading:true};renderAccounts(state.snap);
+ try{state.usage[id]=await api('/api/simple/accounts/usage?id='+encodeURIComponent(id));}
+ catch(e){state.usage[id]={plan_status:'provider-unavailable',error:e.message};}
+ renderAccounts(state.snap);
+}
+function renderAccountUsage(parent,account,ready){
+ const panel=el('div','account-usage');const status=state.usage[account.id];
+ const current=ready?.pass_saved?'ClinePass sign-in saved · subscription not yet verified':'ClinePass sign-in not saved · optional for free models';
+ panel.append(el('p','account-plan-hint',current));
+ if(status?.loading)panel.append(el('p','muted','Reading this account’s plan and usage…'));
+ else if(status){
+  const captions={'active':'Active ClinePass plan confirmed for this account',
+   'no-active-plan-confirmed':'No active ClinePass plan confirmed; free models are independent',
+   'authentication-expired':'Plan usage needs a fresh account token. Previous free-model results are shown separately.',
+   'authentication-unavailable':'No saved authentication for a plan check; free model eligibility is separate.',
+   'identity-mismatch':'Usage withheld: signed-in provider email differs from the account label.',
+   'identity-unavailable':'Usage withheld: the provider did not confirm the account email.',
+   'provider-unavailable':'Account-specific plan information is currently unavailable.'};
+  panel.append(el('p',status.plan_status==='active'?'account-plan-active':'account-plan-hint',captions[status.plan_status]||'Plan status unavailable'));
+  if(status.plan_status==='active'){
+   const windows=el('div','account-usage-windows');
+   for(const [key,label] of [['5h','5-hour'],['weekly','Weekly'],['monthly','Monthly']]){
+    const w=status.windows?.[key],line=el('div','account-usage-window');
+    line.append(el('strong','',label),el('span','',w?String(w.percent_used)+'% used':'Not reported'));
+    if(w?.resets_at)line.append(el('small','',`Resets ${new Date(w.resets_at).toLocaleString()}`));
+    windows.append(line);}
+   panel.append(windows);
+   if(status.usage_status!=='available')panel.append(el('p','muted','Some provider usage windows could not be retrieved.'));
+  }
+ }
+ if(ready?.cline_saved||ready?.pass_saved){const button=makeButton(status?.loading?'Checking…':'Refresh plan & usage',()=>refreshAccountUsage(account.id),!!status?.loading);
+  button.setAttribute('aria-label','Refresh plan and usage for '+account.id);panel.append(button);}
+ parent.append(panel);
+}
+async function previewRemoveAccount(account){
+ state.removal[account.id]={loading:true};renderAccounts(state.snap);
+ try{
+  const preview=await send('/api/accounts',{op:'remove',id:account.id,preview:true});
+  state.removal[account.id]={preview,expectedDigest:state.snap.policy.digest};
+ }catch(error){state.removal[account.id]={error:error.message};}
+ renderAccounts(state.snap);
+}
+function renderAccountRemoval(main,account){
+ const current=state.removal[account.id];if(!current)return;
+ const review=el('div','account-remove-review');review.setAttribute('role','group');
+ review.setAttribute('aria-label','Confirm removal of '+account.id);
+ if(current.loading)review.append(el('p','muted','Checking affected model assignments…'));
+ else if(current.error)review.append(el('p','goal-warning','Cannot preview removal: '+current.error));
+ else{
+  const count=(current.preview.attached_routes||[]).length;
+  review.append(el('strong','','Remove '+account.id+' from this dashboard?'));
+  review.append(el('p','',count?`This detaches ${count} model assignment(s) from routing.`:'This account has no model assignments.'));
+  review.append(el('p','muted','Its Windows profile and credentials stay intact. Running Goals are not stopped.'));
+  const confirm=makeButton('Confirm removal',async()=>{
+   confirm.disabled=true;
+   try{
+    await send('/api/accounts',{op:'remove',id:account.id,detach:true,expected_digest:current.expectedDigest,note:'confirmed account removal from dashboard'});
+    delete state.removal[account.id];delete state.usage[account.id];
+    tell(account.id+' removed from routing preferences; local credentials were preserved.');await load(true);
+   }catch(error){state.removal[account.id]={...current,error:'Removal not completed: '+error.message};renderAccounts(state.snap);}
+  });confirm.classList.add('danger-button');review.append(confirm);
+  if(current.error)review.append(el('p','goal-warning',current.error));
+ }
+ review.append(makeButton('Cancel',()=>{delete state.removal[account.id];renderAccounts(state.snap);}));
+ main.append(review);
+}
 function renderAccounts(snap){const box=clear($('accounts'));
  const accounts=[...(snap.policy.accounts||[])].sort((a,b)=>(a.priority??0)-(b.priority??0));
  $('account-count').textContent=`${accounts.length} / 5`;const add=accounts.length<5;
@@ -178,11 +285,7 @@ function renderAccounts(snap){const box=clear($('accounts'));
    !ready.cline_saved?'Pi Cline sign-in missing':'Cline Free sign-in saved';
  const routeState=account.enabled===false?'Not in routing':!ready?.cline_saved?'Not ready for free routing':free.recent?'Free model available · checked recently':free.latest?'Free model worked earlier · recheck due':'Free models need an availability check';
  main.append(el('strong','',hasEmail?account.label:'Email not linked'),el('small','',`${account.id} | ${routeState} | ${profileState}`));
- const pass=el('div','pass-line');const passMessage=!ready?'ClinePass status not checked':!ready.profile_exists?'ClinePass: profile not created':
-   ready.pass_saved?'ClinePass sign-in saved | plan and usage not synced here':'ClinePass not connected · optional for free models';
- pass.append(el('span','',passMessage));
- if(ready?.pass_saved){const link=el('a','pass-link','View 5h / weekly / monthly usage');link.href='https://app.cline.bot/dashboard';link.target='_blank';link.rel='noopener noreferrer';link.title='Open Cline dashboard; select this same account to view its live limits';pass.append(link);}
- main.append(pass);
+ renderAccountUsage(main,account,ready);
  if(ready&&!ready.cline_saved){
   const stage=ready.profile_exists?'signin':'provision';
   const connect=el('div','account-connect'),label=el('div','connect-label',stage==='signin'?'Next step: sign in to Pi':'Next step: create your Pi profile');
@@ -215,7 +318,8 @@ function renderAccounts(snap){const box=clear($('accounts'));
  menu.append(makeButton('↑ Priority',()=>moveAccount(accounts,index,-1),index===0),makeButton('↓ Priority',()=>moveAccount(accounts,index,1),index===accounts.length-1));
  menu.append(makeButton('Set email',()=>editEmail(account,main)),makeButton('Check profile',()=>verifyAccount(account.id)));
  menu.append(makeButton(account.enabled===false?'Enable':'Disable',()=>toggleAccount(account)));
- manage.append(summary,menu);row.append(avatar,main,manage);box.append(row);
+ const remove=makeButton('Remove account',()=>previewRemoveAccount(account));remove.classList.add('account-remove-trigger');
+ renderAccountRemoval(main,account);manage.append(summary,menu);row.append(avatar,main,manage,remove);box.append(row);
  }
 }
 async function mutateAccount(body){const result=await send('/api/accounts',body);tell(`Account ${body.id} updated. Existing Pi attempts are not interrupted.`);await load(true);return result;}
@@ -253,6 +357,9 @@ async function addAccount(event){
  finally{submit.disabled=false;submit.textContent='Add & connect account';}
 }
 async function load(preserve=false){if(state.loading)return;state.loading=true;try{const [snap,readiness]=await Promise.all([api('/api/snapshot'),api('/api/simple/accounts/readiness')]);state.snap=snap;state.readiness=Object.fromEntries((readiness.accounts||[]).map(a=>[a.id,a]));state.connected=true;const status=$('connection');status.textContent='Connected';status.className='status good';renderRouter(snap);renderWork(snap);renderAccounts(snap);
+ if(!state.usageInitialized){state.usageInitialized=true;
+  (readiness.accounts||[]).filter(a=>a.cline_saved||a.pass_saved)
+    .forEach(a=>refreshAccountUsage(a.id));}
 const saved=(snap.policy.routes||[]).filter(r=>r.tier==='free'&&r.enabled!==false).slice(0,4).map(r=>r.model);if(!state.dirty||!preserve){state.selected=[...saved];state.saved=[...saved];state.dirty=false;}else{state.saved=[...saved];state.dirty=JSON.stringify(state.selected)!==JSON.stringify(saved);}state.catalog=[...new Set([...state.catalog,...saved])];renderModels();}
 catch(e){state.connected=false;const status=$('connection');status.textContent='Disconnected';status.className='status bad';tell('Connection lost. Saved information may be stale. Changes are disabled until the service responds.',true);$('save-models').disabled=true;}finally{state.loading=false;}}
 $('refresh').addEventListener('click',()=>load(true));$('save-models').addEventListener('click',saveModels);$('add-account').addEventListener('submit',addAccount);

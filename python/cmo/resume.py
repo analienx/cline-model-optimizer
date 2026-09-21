@@ -76,6 +76,41 @@ def _no_competing_router() -> None:
         raise ResumeRejected('Could not verify Pi process ownership; resume refused') from exc
     if count:
         raise ResumeRejected('A Shiftio Pi router is already running; no duplicate was started')
+def inspect_resume(goal_id: str, decision: dict[str, Any]) -> dict[str, Any]:
+    """Read-only preflight; no provider request, executor, or new Goal."""
+    route = decision.get('route') or {} if isinstance(decision, dict) else {}
+    context = {'goal_id': goal_id, 'action': decision.get('action') if isinstance(decision, dict) else None,
+               'route': {'account_alias': route.get('account_alias'), 'model': route.get('model'),
+                         'tier': route.get('tier')} if isinstance(route, dict) else None}
+    try:
+        if (not isinstance(decision, dict) or decision.get('action') not in ('PROBE', 'LAUNCH')
+                or decision.get('free_only') is not True or route.get('tier') != 'free'):
+            raise ResumeRejected('No eligible free-only route. Check the current model status and quota.')
+        record = _read_telemetry(goal_id)
+        if int(record.get('issue') or 0) != 56:
+            raise ResumeRejected('Saved Goal issue does not match the approved Shiftio pilot')
+        session = Path(str(record.get('session_file') or ''))
+        _saved_goal(session, goal_id)
+        repo = WORKSPACE/'worktrees'/'shiftio-pilot-e2e-20260920'
+        launcher = WORKSPACE/'repos'/'config'/'tools'/'pi'/'Start-PiExecutor.ps1'
+        if not repo.is_dir() or not (repo/'.git').exists() or not launcher.is_file():
+            raise ResumeRejected('Approved Shiftio checkout or supervised launcher is unavailable')
+        running = ACTIVE_LAUNCHES.get(goal_id)
+        if running is not None:
+            exit_code = running.poll()
+            if exit_code is None:
+                return {**context, 'ready': False, 'status': 'launching',
+                        'reason': 'Supervised launcher is running; awaiting verified Goal telemetry.'}
+            if exit_code != 0:
+                return {**context, 'ready': False, 'status': 'launcher-failed',
+                        'reason': f'Supervised launcher exited with code {exit_code}; the Goal did not resume.'}
+            return {**context, 'ready': False, 'status': 'awaiting-telemetry',
+                    'reason': 'Launcher completed; confirm a new Goal heartbeat before treating it as resumed.'}
+        _no_competing_router()
+    except (ResumeRejected, OSError, ValueError) as exc:
+        return {**context, 'ready': False, 'reason': str(exc)}
+    return {**context, 'ready': True, 'reason': 'Existing session and a free-only route are eligible for a resume request; execution is not yet confirmed.'}
+
 def request_resume(goal_id: str, decision: dict[str,Any]) -> dict[str,Any]:
     """Request the existing supervised launcher; never claim a completed resume."""
     if not isinstance(decision,dict):

@@ -34,3 +34,19 @@ button:hover:not(:disabled),details summary:hover{filter:brightness(.92)}button:
 @media(max-width:760px){.account-connect{padding:10px}.account-connect-button{width:100%}.account-connect .connect-label{flex-basis:100%}}
 
 .account-connect textarea.account-command{display:block;width:100%;min-height:77px;height:auto;resize:vertical;border:1px solid #c7dacb;border-radius:8px;background:#fff;padding:10px;font:12px/1.55 Consolas,monospace;color:#183c2e;user-select:text;-webkit-user-select:text;overflow-wrap:anywhere;white-space:pre-wrap}.account-connect textarea.account-command:focus{outline:3px solid #96bfa0;outline-offset:2px}.account-device-note{font-weight:650;color:#5a685d}
+/* Verified per-account plan usage, safe removal and expanded project sessions. */
+.account-usage{display:grid;gap:8px;margin-top:9px;padding:11px;border:1px solid #e3ebe1;border-radius:11px;background:#f9fbf8;max-width:650px}
+.account-usage p{margin:0;font-size:12px;line-height:1.5}.account-plan-active{color:#2d704a;font-weight:800}.account-plan-hint{color:#64776c}
+.account-usage-windows{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}.account-usage-window{display:grid;gap:4px;padding:9px;background:#fff;border:1px solid #dce9d9;border-radius:9px;font-size:12px}
+.account-usage-window strong{font-size:12px}.account-usage-window span{color:#2e6647;font-weight:800;font-variant-numeric:tabular-nums}.account-usage-window small{overflow-wrap:anywhere}
+.account-usage>button{justify-self:start}.account-remove-review{margin:11px 0;padding:13px;background:#fff9f5;border:1px solid #e8c9b8;border-radius:10px;display:grid;gap:10px}
+.account-remove-review p{margin:0;font-size:12px;line-height:1.5}.danger-button{color:#a43f34;border-color:#e4b4ac;background:#fff5f3}
+.work-item{flex-wrap:wrap}.work-item .item-main{min-width:200px}.work-item .work-right{flex:0 0 auto}.goal-detail{flex:1 1 100%;margin:3px 0 4px;padding:15px;border:1px solid #dbe7dc;background:#f7faf6;border-radius:12px;display:grid;gap:12px;min-width:0}
+.goal-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0}.goal-fact{display:grid;gap:5px;padding:9px;border:1px solid #e2eae0;background:#fff;border-radius:8px;min-width:0}
+.goal-fact dt{font-size:11px;color:#65796c}.goal-fact dd{margin:0;font-size:12px;font-weight:750;overflow-wrap:anywhere}.goal-line,.goal-warning,.goal-ready{margin:0;font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+.goal-warning{color:#9c483b}.goal-ready{color:#286644}.goal-issue{font-size:12px;font-weight:800;color:var(--green)}
+@media(max-width:760px){.account-usage-windows,.goal-facts{grid-template-columns:1fr}.goal-detail{padding:11px}.work-item .work-right{width:100%;flex-wrap:wrap}}
+
+/* Keep expanded session and account controls inside mobile viewport. */
+.work-item .goal-detail{width:100%;max-width:100%;min-width:0;flex:0 0 100%}
+@media(max-width:760px){.work-item{display:flex;flex-direction:column;align-items:stretch}.work-item .item-main,.work-item .work-right,.work-item .goal-detail,.work-item>.goal-ready,.work-item>.goal-warning{width:100%;max-width:100%;min-width:0;flex:0 1 auto}.work-item .work-right{justify-content:flex-start}}
