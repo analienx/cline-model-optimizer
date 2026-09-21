@@ -207,9 +207,10 @@ function accountFreeEvidence(snap,id){
  const latest=Math.max(0,...success.map(c=>Number(c.observed_at)||0));
  return {latest,recent:success.some(c=>c.state==='AVAILABLE'&&c.freshness==='fresh')};
 }
-async function refreshAccountUsage(id){
+async function refreshAccountUsage(id,renew=false){
  state.usage[id]={loading:true};renderAccounts(state.snap);
- try{state.usage[id]=await api('/api/simple/accounts/usage?id='+encodeURIComponent(id));}
+ try{state.usage[id]=renew?await send('/api/simple/accounts/refresh-usage',{id}):
+  await api('/api/simple/accounts/usage?id='+encodeURIComponent(id));}
  catch(e){state.usage[id]={plan_status:'provider-unavailable',error:e.message};}
  renderAccounts(state.snap);
 }
@@ -221,12 +222,16 @@ function renderAccountUsage(parent,account,ready){
  else if(status){
   const captions={'active':'Active ClinePass plan confirmed for this account',
    'no-active-plan-confirmed':'No active ClinePass plan confirmed; free models are independent',
-   'authentication-expired':'Plan usage needs a fresh account token. Previous free-model results are shown separately.',
+   'authentication-expired':'Plan usage needs a fresh account token. Select Refresh plan & usage below. Free models are independent.',
    'authentication-unavailable':'No saved authentication for a plan check; free model eligibility is separate.',
    'identity-mismatch':'Usage withheld: signed-in provider email differs from the account label.',
    'identity-unavailable':'Usage withheld: the provider did not confirm the account email.',
    'provider-unavailable':'Account-specific plan information is currently unavailable.'};
   panel.append(el('p',status.plan_status==='active'?'account-plan-active':'account-plan-hint',captions[status.plan_status]||'Plan status unavailable'));
+  if(status.usage_status&&status.plan_status==='authentication-expired')panel.append(el('p','account-plan-hint',
+   status.usage_status==='profile-busy'?'Pi is using this account’s credentials. Try again shortly.':
+   status.usage_status==='sign-in-required'?'Cline sign-in needs reconnecting. Free models remain independent.':
+   'Account token renewal was not completed. Existing credentials were preserved.'));
   if(status.plan_status==='active'){
    const windows=el('div','account-usage-windows');
    for(const [key,label] of [['5h','5-hour'],['weekly','Weekly'],['monthly','Monthly']]){
@@ -238,7 +243,7 @@ function renderAccountUsage(parent,account,ready){
    if(status.usage_status!=='available')panel.append(el('p','muted','Some provider usage windows could not be retrieved.'));
   }
  }
- if(ready?.cline_saved||ready?.pass_saved){const button=makeButton(status?.loading?'Checking…':'Refresh plan & usage',()=>refreshAccountUsage(account.id),!!status?.loading);
+ if(ready?.cline_saved||ready?.pass_saved){const button=makeButton(status?.loading?'Checking…':'Refresh plan & usage',()=>refreshAccountUsage(account.id,true),!!status?.loading);
   button.setAttribute('aria-label','Refresh plan and usage for '+account.id);panel.append(button);}
  parent.append(panel);
 }
