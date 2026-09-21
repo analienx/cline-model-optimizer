@@ -23,6 +23,7 @@ from .account_clipboard import command_for, copy_native_text
 from .account_onboarding import launch_account_onboarding
 from .account_signin import launch_account_signin
 from .account_usage import account_usage
+from .account_refresh import renew_cline
 from .db import connect, get_meta
 from .events import EventStore, EventValidationError, EventConflictError, ms_to_iso
 from .recheck import RecheckWorker
@@ -229,6 +230,8 @@ class CmoHandler(BaseHTTPRequestHandler):
                 self._create_override(body)
             elif path == "/api/simple/resume":
                 self._resume_goal(body)
+            elif path == "/api/simple/accounts/refresh-usage":
+                self._refresh_account_usage(body)
             elif path == "/api/simple/accounts/copy-command":
                 self._copy_account_command(body)
             elif path == "/api/simple/accounts/start-signin":
@@ -682,7 +685,18 @@ class CmoHandler(BaseHTTPRequestHandler):
         self._json(202, {"ok": True, "started": True, "already_open": False,
                          "message": "Sign-in terminal opened on Windows; complete login there"})
 
-    def _simple_account_usage(self, query: dict) -> None:
+    def _refresh_account_usage(self, body: Any) -> None:
+        origin, host = self.headers.get('Origin', ''), self.headers.get('Host', '')
+        if (not origin or origin.lower() != ('http://' + host).lower()
+                or self.headers.get('Content-Type', '').split(';')[0].lower() != 'application/json'
+                or self.headers.get('Sec-Fetch-Site', 'same-origin') != 'same-origin'):
+            self._json(403, {'error': 'same-origin JSON request required'})
+            return
+        if not isinstance(body, dict) or set(body) != {'id'} or not isinstance(body['id'], str):
+            raise EventValidationError('one registered account alias required')
+        self._simple_account_usage({'id': [body['id']]}, renew=True)
+
+    def _simple_account_usage(self, query: dict, *, renew: bool = False) -> None:
         if not self._loopback_host() or not self._origin_ok():
             self._json(403, {'error': 'local dashboard request required'})
             return
@@ -701,11 +715,14 @@ class CmoHandler(BaseHTTPRequestHandler):
         key = (alias, profile, label)
         with self.service.usage_lock:
             cached = self.service.usage_cache.get(key)
-            if cached and time.time() - cached[0] < 30:
+            if not renew and cached and time.time() - cached[0] < 30:
                 self._json(200, cached[1])
                 return
         # Network calls must not hold the shared lock: other accounts are independent.
-        result = account_usage(alias, profile, label)
+        outcome = renew_cline(profile) if renew else None
+        result = (account_usage(alias, profile, label) if outcome in (None, 'renewed', 'already-current', 'sign-in-required')
+                  else {'account_alias': alias, 'plan_status': 'authentication-expired',
+                        'usage_status': outcome, 'windows': {}, 'checked_at': int(time.time() * 1000)})
         with self.service.usage_lock:
             self.service.usage_cache[key] = (time.time(), result)
         self._json(200, result)
