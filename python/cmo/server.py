@@ -22,10 +22,11 @@ from .catalog import DEFAULT_CATALOG_URL, refresh_catalog, fetch_catalog
 from .account_clipboard import command_for, copy_native_text
 from .account_onboarding import launch_account_onboarding
 from .account_signin import launch_account_signin
+from .account_usage import account_usage
 from .db import connect, get_meta
 from .events import EventStore, EventValidationError, EventConflictError, ms_to_iso
 from .recheck import RecheckWorker
-from .resume import request_resume, ResumeRejected
+from .resume import request_resume, inspect_resume, ResumeRejected
 from .policy import (ALIAS_RE, PolicyError, load_canonical_policy, policy_digest,
                      validate_policy)
 from .snapshot import build_snapshot
@@ -49,6 +50,8 @@ class Service:
         self.pid = os.getpid()
         self.login_lock = threading.Lock()
         self.login_processes = {}
+        self.usage_lock = threading.Lock()
+        self.usage_cache = {}
 
     def state_root(self) -> Path:
         parent = self.db_path.parent
@@ -161,6 +164,10 @@ class CmoHandler(BaseHTTPRequestHandler):
             self._send(200, body, ctype)
         elif path == "/api/simple/accounts/readiness":
             self._simple_account_readiness()
+        elif path == "/api/simple/accounts/usage":
+            self._simple_account_usage(query)
+        elif path == "/api/simple/resume/readiness":
+            self._resume_readiness(query)
         elif path == "/simple.js":
             body, ctype = _asset("simple.js")
             self._send(200, body, ctype)
@@ -522,6 +529,19 @@ class CmoHandler(BaseHTTPRequestHandler):
                     f"fresh catalog omits new model(s) {missing}; not activated")
         return fresh, unverified
 
+    def _resume_readiness(self, query: dict) -> None:
+        if not self._loopback_host() or not self._origin_ok():
+            self._json(403, {'error': 'local dashboard request required'})
+            return
+        ids = query.get('goal_id') or []
+        if len(ids) != 1 or not isinstance(ids[0], str) or len(ids[0]) > 64:
+            self._json(400, {'error': 'one Goal identifier required'})
+            return
+        goal_id = ids[0]
+        snapshot = self.service.snapshot(goal_id=goal_id)
+        result = inspect_resume(goal_id, snapshot.get('decision') or {})
+        self._json(200, result)
+
     def _resume_goal(self, body: Any) -> None:
         if not isinstance(body, dict) or set(body) != {'goal_id'}:
             raise EventValidationError('resume requires only a Goal identifier')
@@ -661,6 +681,34 @@ class CmoHandler(BaseHTTPRequestHandler):
             self.service.login_processes[account] = process
         self._json(202, {"ok": True, "started": True, "already_open": False,
                          "message": "Sign-in terminal opened on Windows; complete login there"})
+
+    def _simple_account_usage(self, query: dict) -> None:
+        if not self._loopback_host() or not self._origin_ok():
+            self._json(403, {'error': 'local dashboard request required'})
+            return
+        aliases = query.get('id') or []
+        if len(aliases) != 1 or not ALIAS_RE.fullmatch(aliases[0]):
+            self._json(400, {'error': 'one registered account alias is required'})
+            return
+        alias = aliases[0]
+        with self.service.store() as store:
+            policy, _, _ = store.active_policy_doc()
+        accounts = [a for a in policy.get('accounts', []) if a.get('id') == alias]
+        if len(accounts) != 1 or not ALIAS_RE.fullmatch(accounts[0].get('profile') or alias):
+            self._json(404, {'error': 'account profile is not registered'})
+            return
+        profile, label = accounts[0].get('profile') or alias, str(accounts[0].get('label') or '')
+        key = (alias, profile, label)
+        with self.service.usage_lock:
+            cached = self.service.usage_cache.get(key)
+            if cached and time.time() - cached[0] < 30:
+                self._json(200, cached[1])
+                return
+        # Network calls must not hold the shared lock: other accounts are independent.
+        result = account_usage(alias, profile, label)
+        with self.service.usage_lock:
+            self.service.usage_cache[key] = (time.time(), result)
+        self._json(200, result)
 
     def _simple_account_readiness(self) -> None:
         """Local Pi profile hints only: credential presence is not live login or entitlement."""
@@ -846,6 +894,11 @@ class CmoHandler(BaseHTTPRequestHandler):
         with self.service.store() as store:
             current, _, _ = store.active_policy_doc()
             doc = json.loads(json.dumps(current))
+            if body.get('op') == 'remove' and not body.get('preview'):
+                expected = body.get('expected_digest')
+                if expected is not None and (not isinstance(expected, str) or expected != policy_digest(current)):
+                    self._json(409, {'error': 'Routing preferences changed; preview removal again'})
+                    return
             accounts = [a for a in (doc.get("accounts") or []) if isinstance(a, dict)]
             by_id = {a.get("id"): a for a in accounts}
             routes = doc.get("routes") or []
@@ -998,7 +1051,8 @@ class CmoHandler(BaseHTTPRequestHandler):
                 return
             saved = store.save_policy_version(
                 candidate, created_by="ui",
-                note=str(body.get("note") or f"account {op}: {alias}")[:256])
+                note=str(body.get("note") or f"account {op}: {alias}")[:256],
+                expected_digest=body.get('expected_digest') if op == 'remove' else None)
             for audit in self._policy_diff(current, candidate):
                 try:
                     store.ingest(audit)
