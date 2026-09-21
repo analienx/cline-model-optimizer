@@ -226,12 +226,17 @@ function renderAccountUsage(parent,account,ready){
    'authentication-unavailable':'No saved authentication for a plan check; free model eligibility is separate.',
    'identity-mismatch':'Usage withheld: signed-in provider email differs from the account label.',
    'identity-unavailable':'Usage withheld: the provider did not confirm the account email.',
+   'identity-access-denied':'Cline denied this account’s identity check. Reconnect this account before retrying.',
+   'plan-not-reported':'Plan and subscription usage are not reported by Cline for this verified account. This does not affect free-model access.',
+   'plan-access-denied':'Cline verified this account but denied access to its plan details.',
+   'provider-rate-limited':'Cline has rate-limited this account’s plan check. Retry later; free models are independent.',
    'provider-unavailable':'Account-specific plan information is currently unavailable.'};
   panel.append(el('p',status.plan_status==='active'?'account-plan-active':'account-plan-hint',captions[status.plan_status]||'Plan status unavailable'));
   if(status.usage_status&&status.plan_status==='authentication-expired')panel.append(el('p','account-plan-hint',
    status.usage_status==='profile-busy'?'Pi is using this account’s credentials. Try again shortly.':
    status.usage_status==='sign-in-required'?'Cline sign-in needs reconnecting. Free models remain independent.':
    'Account token renewal was not completed. Existing credentials were preserved.'));
+  if(status.checked_at&&status.identity_verified)panel.append(el('p','muted',`Cline account identity verified · checked ${new Date(status.checked_at).toLocaleString()}`));
   if(status.plan_status==='active'){
    const windows=el('div','account-usage-windows');
    for(const [key,label] of [['5h','5-hour'],['weekly','Weekly'],['monthly','Monthly']]){
@@ -240,7 +245,11 @@ function renderAccountUsage(parent,account,ready){
     if(w?.resets_at)line.append(el('small','',`Resets ${new Date(w.resets_at).toLocaleString()}`));
     windows.append(line);}
    panel.append(windows);
-   if(status.usage_status!=='available')panel.append(el('p','muted','Some provider usage windows could not be retrieved.'));
+   if(status.usage_status!=='available')panel.append(el('p','muted',
+    status.usage_status==='not-reported'?'Cline does not report plan usage for this account. Free-model availability is separate.':
+    status.usage_status==='rate-limited'?'Cline rate-limited usage details; try again later.':
+    status.usage_status==='access-denied'?'Cline denied access to usage details for this account.':
+    'Some provider usage windows could not be retrieved.'));
   }
  }
  if(ready?.cline_saved||ready?.pass_saved){const button=makeButton(status?.loading?'Checking…':'Refresh plan & usage',()=>refreshAccountUsage(account.id,true),!!status?.loading);
