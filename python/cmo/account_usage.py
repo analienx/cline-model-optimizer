@@ -49,6 +49,8 @@ def account_usage(alias: str, profile: str, label: str) -> dict:
     token = auth['access']
     code, user = _fetch('', token)
     if code == 401: return _result(alias, 'authentication-expired')
+    if code == 403: return _result(alias, 'identity-access-denied')
+    if code == 429: return _result(alias, 'provider-rate-limited')
     if code != 200 or not isinstance(user, dict):
         return _result(alias, 'provider-unavailable')
     actual_email = user.get('email')
@@ -58,11 +60,14 @@ def account_usage(alias: str, profile: str, label: str) -> dict:
         return _result(alias, 'identity-unavailable')
     code, data = _fetch('/plan', token)
     if code == 401: return _result(alias, 'authentication-expired')
+    if code == 403: return _result(alias, 'plan-access-denied', identity_verified=True)
+    if code == 404: return _result(alias, 'plan-not-reported', identity_verified=True)
+    if code == 429: return _result(alias, 'provider-rate-limited', identity_verified=True)
     if code != 200 or not isinstance(data, dict):
-        return _result(alias, 'provider-unavailable')
+        return _result(alias, 'provider-unavailable', identity_verified=True)
     plan = data.get('plan')
     if not isinstance(plan, dict) or not data.get('subscriptionId'):
-        return _result(alias, 'no-active-plan-confirmed')
+        return _result(alias, 'no-active-plan-confirmed', identity_verified=True)
     try:
         from datetime import datetime, timezone
         period_end = datetime.fromisoformat(str(data['currentPeriodEnd']).replace('Z', '+00:00'))
@@ -70,10 +75,11 @@ def account_usage(alias: str, profile: str, label: str) -> dict:
     except (KeyError, ValueError, TypeError):
         period_active = False
     if plan.get('isActive') is not True or not period_active:
-        return _result(alias, 'no-active-plan-confirmed')
+        return _result(alias, 'no-active-plan-confirmed', identity_verified=True)
     code, limits = _fetch('/plan/usage-limits', token)
     if code != 200 or not isinstance(limits, dict):
-        return _result(alias, 'active', usage_status='authentication-expired' if code == 401 else 'unavailable')
+        usage_status = {401:'authentication-expired',403:'access-denied',404:'not-reported',429:'rate-limited'}.get(code,'unavailable')
+        return _result(alias, 'active', identity_verified=True, usage_status=usage_status)
     windows = {}
     for row in limits.get('limits', []):
         if not isinstance(row, dict) or row.get('type') not in WINDOWS:
@@ -84,5 +90,5 @@ def account_usage(alias: str, profile: str, label: str) -> dict:
         reset = row.get('resetsAt')
         windows[WINDOWS[row['type']]] = {'percent_used': value,
             'resets_at': reset if isinstance(reset, str) and len(reset) <= 40 else None}
-    return _result(alias, 'active', usage_status='available' if len(windows) == 3 else 'partial',
-                   windows=windows)
+    return _result(alias, 'active', identity_verified=True,
+                   usage_status='available' if len(windows) == 3 else 'partial', windows=windows)

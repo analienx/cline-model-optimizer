@@ -48,7 +48,29 @@ class UsageTests(unittest.TestCase):
         self.credentials(['cline-pass'])
         with patch('cmo.account_usage._fetch',side_effect=[(200,{'email':'test@example.test'}),(404,None)]):
             result=account_usage(self.alias,self.alias,'test@example.test')
-        assert result['plan_status']=='provider-unavailable' and result['windows']=={}
+        assert result['plan_status']=='plan-not-reported' and result['identity_verified'] is True and result['windows']=={}
+
+    def test_provider_error_codes_are_not_confused_with_free_quota(self):
+        self.credentials(['cline'])
+        for code, expected in [(403, 'plan-access-denied'), (404, 'plan-not-reported'),
+                               (429, 'provider-rate-limited'), (0, 'provider-unavailable')]:
+            with self.subTest(code=code), patch('cmo.account_usage._fetch',side_effect=[
+                (200,{'email':'test@example.test'}),(code,None)]):
+                result=account_usage(self.alias,self.alias,'test@example.test')
+                self.assertEqual(result['plan_status'], expected)
+                self.assertTrue(result['identity_verified'])
+                self.assertEqual(result['windows'], {})
+
+    def test_subscription_usage_404_is_not_zero_or_free_quota(self):
+        self.credentials(['cline'])
+        plan=(200,{'subscriptionId':'sub-1','currentPeriodEnd':'2099-01-01T00:00:00Z',
+                   'plan':{'isActive':True}})
+        with patch('cmo.account_usage._fetch',side_effect=[
+            (200,{'email':'test@example.test'}),plan,(404,None)]):
+            result=account_usage(self.alias,self.alias,'test@example.test')
+        self.assertEqual(result['plan_status'],'active')
+        self.assertEqual(result['usage_status'],'not-reported')
+        self.assertEqual(result['windows'],{})
 
     def test_mismatched_email_never_displays_someone_elses_usage(self):
         self.credentials()
