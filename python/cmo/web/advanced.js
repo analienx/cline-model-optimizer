@@ -1,18 +1,141 @@
-"use strict";
-const $ = id => document.getElementById(id);
-const node = (tag, cls, value) => {const n=document.createElement(tag);if(cls)n.className=cls;if(value!==undefined)n.textContent=String(value);return n;};
-const addFact = (target,label,value) => {const item=node('div','advanced-fact');item.append(node('span','muted',label),node('strong','',value??'Unknown'));target.append(item);};
-const names = value => ({'cline-free/muse-spark-1.3-contributor':'Muse Spark 1.3','z-ai/glm-5.3-flash':'GLM 5.3 Flash','cline-free/deepseek-v4.1-flash':'DeepSeek V4.1 Flash'})[value]||String(value||'Unknown').split('/').pop().replace(/-/g,' ');
-const ago = time => !time?'No evidence':Math.max(0,Math.floor((Date.now()-Number(time))/60000))+'m ago';
-const goalName = id => ({'1452826a-661e-4a0d-b88a-6054c2de5a25':'Shiftio','1c2ccdda-855a-4d2c-b75d-4897b31ae8d1':'CMO dashboard','goal-cmo-trustworthy-20260919':'CMO migration | legacy'})[id]||'Saved Goal';
-function classification(cell,lastSuccess=0){if(!cell)return ['unknown','Not tested for this model'];if(cell.state==='AVAILABLE'&&cell.freshness==='fresh')return ['good','Recently verified'];if(cell.state==='QUOTA'&&(!cell.reset_at||Number(cell.reset_at)>Date.now()))return ['bad','Quota exhausted'];if(cell.state==='AUTH_BLOCKED')return lastSuccess>Number(cell.observed_at||0)?['pending','Earlier sign-in failure | recheck model']:['bad','Sign-in required for this model'];if(cell.state==='CAPABILITY_UNAVAILABLE')return ['bad','Not offered'];if(cell.state==='QUOTA_EXPIRED'||cell.state==='QUOTA')return ['pending','Cooldown passed | recheck needed'];if(cell.state==='AVAILABLE'||cell.state==='STALE'&&cell.stored_state==='AVAILABLE')return ['pending','Worked earlier | recheck needed'];return ['unknown',cell.state==='TRANSIENT'?'Provider error':'Unknown | recheck needed'];}
-async function load(){try{const response=await fetch('/api/snapshot',{cache:'no-store'});if(!response.ok)throw Error('HTTP '+response.status);const snap=await response.json();$('connection').textContent='Connected';$('connection').className='status good';
- const matrix=$('matrix');matrix.replaceChildren();const accounts=[...(snap.policy?.accounts||[])].sort((a,b)=>(a.priority??0)-(b.priority??0));let ready=0,quota=0,pending=0,unknown=0;
- for(const route of snap.free_matrix||[]){const box=node('div','advanced-model');box.append(node('h3','',names(route.model)));const cells=node('div','advanced-account-grid');for(const account of accounts){if(account.enabled===false)continue;const cell=route.accounts?.[account.id];const lastSuccess=Math.max(0,...(snap.free_matrix||[]).map(r=>r.accounts?.[account.id]).filter(c=>c?.stored_state==='AVAILABLE'&&c.last_reason_code==='probe.ok').map(c=>Number(c.observed_at)||0));const [kind,label]=classification(cell,lastSuccess);if(kind==='good')ready++;if(kind==='bad')quota++;if(kind==='pending')pending++;if(kind==='unknown')unknown++;const item=node('div','advanced-cell '+kind);item.append(node('strong','',account.id.replace('account-','Account ')),node('span','',label),node('small','',cell?.reset_at&&kind==='bad'?'Reset reported: '+new Date(Number(cell.reset_at)).toLocaleString():'Last observation: '+ago(cell?.observed_at)));cells.append(item);}box.append(cells);matrix.append(box);}
- $('route-count').textContent=(snap.free_matrix||[]).length+' models';$('route-summary').textContent=ready?`${ready} verified free routes | ${quota} blocked | ${pending} need recheck | ${unknown} unknown`:`No free route recently verified | ${quota} blocked | ${pending} need recheck | ${unknown} unknown`;
- const goals=$('goals');goals.replaceChildren();for(const goal of snap.goals||[]){const item=node('div','advanced-goal');const detail=node('div');detail.append(node('strong','',goalName(goal.goal_id)),node('small','',`Saved: ${goal.status||'unknown'} | observed ${ago(goal.last_activity_at)}`));item.append(detail,node('span','work-status '+(goal.display_status==='blocked'?'bad':''),goal.display_status||'Unverified'));goals.append(item);}if(!goals.children.length)goals.append(node('p','muted','No saved Goals.'));
- const facts=$('service-info');facts.replaceChildren();addFact(facts,'Service',snap.service?.status||'Unknown');addFact(facts,'Last event',snap.service?.last_event_received_iso||'None');addFact(facts,'State revision',snap.state_revision);addFact(facts,'Policy version',snap.policy?.version);addFact(facts,'Artifact',String(snap.service?.artifact_digest||'Unknown').slice(0,12));
- const events=$('events');events.replaceChildren();for(const event of (snap.recent_events||[]).slice(0,15)){const line=node('div','advanced-event');line.append(node('strong','',event.event_type||'Event'),node('span','',event.reason_code||'No reason code'));events.append(line);}if(!events.children.length)events.append(node('p','muted','No recent events.'));
- const catalog=$('catalog-info');catalog.replaceChildren();addFact(catalog,'Provider catalog',snap.freshness?.catalog_status||'Unknown');addFact(catalog,'Model entries',(snap.catalog||[]).length);addFact(catalog,'Policy digest',String(snap.policy?.digest||'Unknown').slice(0,12));
- }catch(error){$('connection').textContent='Disconnected';$('connection').className='status bad';$('route-summary').textContent='Unable to refresh diagnostics: '+error.message;}}
-$('refresh').addEventListener('click',load);load();setInterval(load,15000);
+/* Single-screen CMO enhancements. /advanced.js stays as the existing bundled asset URL. */
+(() => {
+  'use strict';
+  if (typeof renderRouter !== 'function' || !document.getElementById('accounts')) return;
+  const openAccounts = new Set();
+  let showAllWork = false;
+  const node = (tag, className = '', content) => {
+    const item = document.createElement(tag);
+    if (className) item.className = className;
+    if (content !== undefined) item.textContent = String(content);
+    return item;
+  };
+  const displayTime = value => Number(value) > 0 ? new Date(Number(value)).toLocaleString() : 'No observation recorded';
+  const routeFor = (snap, account, model) => (snap.policy?.routes || []).find(route =>
+    route.model === model && route.tier === 'free' && route.enabled !== false && route.accounts?.includes(account.id));
+  const evidenceFor = (snap, account, model) =>
+    (snap.free_matrix || []).find(row => row.model === model)?.accounts?.[account.id];
+  const requestFor = (account, route, cell) => ({
+    route_key: cell?.route_key || `${account.id}|${route.provider}|${route.model}|free`,
+    account_alias: account.id, provider: route.provider, model: route.model, tier: 'free'
+  });
+  function freeStatus(cell, ready) {
+    if (!ready?.cline_saved) return ['Connect Cline Free to check this model', 'setup'];
+    if (!cell) return ['Not checked for this account', 'check'];
+    if (cell.state === 'AVAILABLE' && cell.freshness === 'fresh')
+      return ['Recently worked · remaining free quota not reported', 'working'];
+    if (cell.state === 'QUOTA' && (!cell.reset_at || Number(cell.reset_at) > Date.now()))
+      return [cell.reset_at ? `Exhausted · reported reset ${displayTime(cell.reset_at)}` : 'Exhausted · reset time not reported', 'exhausted'];
+    if (cell.state === 'AUTH_BLOCKED')
+      return ['The last model check failed sign-in; Cline login is saved now. A new model check is needed.', 'check'];
+    if (cell.state === 'CAPABILITY_UNAVAILABLE') return ['Provider did not offer this model', 'unavailable'];
+    if (cell.state === 'QUOTA_EXPIRED' || cell.state === 'QUOTA')
+      return ['Previous quota cooldown elapsed · recheck required', 'check'];
+    if (cell.state === 'TRANSIENT') return ['Provider check failed temporarily · retry available', 'check'];
+    if (cell.state === 'AVAILABLE' || cell.state === 'STALE')
+      return ['Worked previously · availability must be checked again', 'check'];
+    return ['No current availability evidence · check this free model', 'check'];
+  }
+  function enhanceRouter(snap) {
+    const area = document.getElementById('router-evidence');
+    if (area) {
+      area.replaceChildren();
+      const d = snap.decision || {}, route = d.route || {};
+      const heading = node('strong', '', d.action === 'LAUNCH' && route.tier === 'free' ? 'A free route was recently verified' :
+        d.action === 'PROBE' && route.tier === 'free' ? 'The next free route needs a fresh check' : 'No free route confirmed now');
+      area.append(heading);
+      area.append(node('p', 'router-evidence-explanation', route.tier === 'free' && route.model ?
+        `${names(route.model)} · ${route.account_alias || 'account not reported'} · ${d.reason || 'No routing reason recorded'}` :
+        (d.reason || 'A supervised free-model check is required before work can start.')));
+      area.append(node('small', 'muted', 'Evidence is time-limited. An expired check does not prove a model is unavailable. No paid route is checked here.'));
+    }
+    const rows = [...document.querySelectorAll('#route-status .route-item')];
+    const models = (snap.policy?.routes || []).filter(route => route.tier === 'free' && route.enabled !== false).slice(0, 4);
+    const accounts = [...(snap.policy?.accounts || [])].filter(a => a.enabled !== false).sort((a,b) => (a.priority ?? 0) - (b.priority ?? 0));
+    rows.forEach((row, index) => {
+      const model = models[index]?.model;
+      if (!model) return;
+      const chips = row.querySelectorAll('.route-cell');
+      accounts.filter(a => routeFor(snap, a, model)).forEach((account, j) => {
+        const chip = chips[j], cell = evidenceFor(snap, account, model), ready = state.readiness[account.id];
+        if (!chip || !cell) return;
+        const [description, category] = freeStatus(cell, ready);
+        chip.replaceChildren(node('span', '', `${account.id.replace('account-', 'Account ')} · ${description}`));
+        chip.append(node('small', 'evidence-time', `Last model check: ${displayTime(cell.observed_at)}`));
+        if (category === 'check' && ready?.cline_saved) {
+          const route = routeFor(snap, account, model);
+          if (route) chip.append(makeButton('Request free check', () => recheckRoute(requestFor(account, route, cell))));
+        }
+      });
+    });
+  }
+  function enhanceAccounts(snap) {
+    const accounts = [...(snap.policy?.accounts || [])].sort((a,b) => (a.priority ?? 0) - (b.priority ?? 0));
+    [...document.querySelectorAll('#accounts .account-item')].forEach((row, index) => {
+      const account = accounts[index], main = row.querySelector('.item-main');
+      if (!account || !main) return;
+      const detail = node('details', 'account-disclosure'), toggle = node('summary', '', 'Free models & plan usage');
+      const body = node('div', 'account-expanded');
+      detail.open = openAccounts.has(account.id) || state.onboardingHelp?.id === account.id && state.readiness[account.id]?.setup_running;
+      detail.addEventListener('toggle', () => detail.open ? openAccounts.add(account.id) : openAccounts.delete(account.id));
+      detail.append(toggle, body);
+      const free = node('section', 'account-free-models');
+      free.append(node('h3', '', 'Free model availability'));
+      free.append(node('p', 'muted', 'Model checks show whether a free request worked or reached a quota limit. The provider does not report a remaining percentage per free model.'));
+      const routes = (snap.policy?.routes || []).filter(r => r.tier === 'free' && r.enabled !== false && r.accounts?.includes(account.id));
+      for (const route of routes) {
+        const cell = evidenceFor(snap, account, route.model);
+        const [description, category] = freeStatus(cell, state.readiness[account.id]);
+        const model = node('div', `free-model-row ${category}`);
+        model.append(node('strong', '', names(route.model)), node('p', '', description));
+        if (category === 'exhausted') {
+          const progress = node('progress'); progress.max = 100; progress.value = 100;
+          progress.setAttribute('aria-label', `${names(route.model)}: reported quota exhausted`);
+          model.append(progress);
+        }
+        if (cell?.observed_at) model.append(node('small', 'muted', `Checked ${displayTime(cell.observed_at)}`));
+        if (category === 'check' && state.readiness[account.id]?.cline_saved)
+          model.append(makeButton('Request free check', () => recheckRoute(requestFor(account, route, cell))));
+        free.append(model);
+      }
+      if (!routes.length) free.append(node('p', 'muted', 'No free models assigned to this account.'));
+      body.append(free);
+      const usage = main.querySelector('.account-usage');
+      if (usage) {
+        usage.prepend(node('h3', '', 'Plan usage · account-wide'));
+        const windows = state.usage[account.id]?.windows || {};
+        if (state.usage[account.id]?.plan_status === 'active') {
+          for (const [key, title] of [['5h','5-hour'], ['weekly','Weekly'], ['monthly','Monthly']]) {
+            const percent = windows[key]?.percent_used;
+            const rowForWindow = [...usage.querySelectorAll('.account-usage-window')].find(row => row.querySelector('strong')?.textContent === title);
+            if (rowForWindow && typeof percent === 'number' && Number.isFinite(percent) && percent >= 0) {
+              const progress = node('progress'); progress.max = 100; progress.value = Math.min(100, percent);
+              progress.setAttribute('aria-label', `${title} plan usage: ${percent}% used`);
+              rowForWindow.append(progress);
+            }
+          }
+        }
+      }
+      while (main.childNodes.length > 2) body.append(main.childNodes[2]);
+      for (const control of [...row.children]) if (control !== main && !control.classList.contains('account-avatar')) body.append(control);
+      body.append(node('p', 'muted', 'A failed or stale model check is not a failed account. A requested free check runs when a supervised Pi worker is available; CMO does not continuously retry provider requests in the background.'));
+      main.append(detail);
+    });
+  }
+  function enhanceWork() {
+    const host = document.getElementById('work');
+    const rows = [...host.querySelectorAll('.work-item')];
+    if (rows.length <= 5) return;
+    rows.forEach((row, i) => {row.hidden = !showAllWork && i >= 5;});
+    const action = makeButton(showAllWork ? 'Show first five' : `Show all ${rows.length} projects & sessions`, () => {
+      showAllWork = !showAllWork; renderWork(state.snap);
+    });
+    action.classList.add('show-more-work'); action.setAttribute('aria-expanded', String(showAllWork));
+    host.append(action);
+  }
+  const originalRouter = renderRouter, originalAccounts = renderAccounts, originalWork = renderWork;
+  renderRouter = snap => { originalRouter(snap); enhanceRouter(snap); };
+  renderAccounts = snap => { originalAccounts(snap); enhanceAccounts(snap); };
+  renderWork = snap => { originalWork(snap); enhanceWork(); };
+  if (state.snap) {renderRouter(state.snap); renderAccounts(state.snap); renderWork(state.snap);}
+})();

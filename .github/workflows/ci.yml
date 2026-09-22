@@ -31,3 +31,15 @@ jobs:
       - name: Run Foundry route regressions
         shell: pwsh
         run: ./tests/Test-CmoFoundryRoute.ps1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Test single-screen and account dashboard contracts
+        shell: pwsh
+        run: |
+          python -m pip install pytest
+          $env:PYTHONPATH = "$env:GITHUB_WORKSPACE\python;$env:GITHUB_WORKSPACE\tests"
+          python -m pytest -q tests/test_single_screen_experience.py tests/test_simple_dashboard.py
+      - name: Check dashboard JavaScript syntax
+        shell: pwsh
+        run: node --check python/cmo/web/advanced.js
